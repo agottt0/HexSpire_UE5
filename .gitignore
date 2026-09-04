@@ -1,0 +1,35 @@
+# Unreal Engine generated files
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+ExamplesContent/
+
+# Generated project files
+*.sln
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+*.ipch
+
+# IDE and editor caches
+.vs/
+.vscode/
+.idea/
+*.code-workspace
+
+# Packaged builds, but keep project build scripts
+Build/*
+!Build/*/
+!Build/*/Scripts/
+
+# Plugin generated files
+Plugins/*/Binaries/
+Plugins/*/Intermediate/
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
