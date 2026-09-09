@@ -2,5 +2,41 @@
 	"FileVersion": 3,
 	"EngineAssociation": "5.8",
 	"Category": "",
-	"Description": ""
+	"Description": "Hex Spire - 东方怪谈 x 现代城市 - 六边形战棋 Roguelike",
+	"Modules": [
+		{
+			"Name": "HexSpireCore",
+			"Type": "Runtime",
+			"LoadingPhase": "PreDefault"
+		},
+		{
+			"Name": "HexSpire",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"AdditionalDependencies": [
+				"Engine",
+				"UMG"
+			]
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "ModelingToolsEditorMode",
+			"Enabled": true,
+			"TargetAllowList": [
+				"Editor"
+			]
+		},
+		{
+			"Name": "ProceduralMeshComponent",
+			"Enabled": true
+		},
+		{
+			"Name": "PythonScriptPlugin",
+			"Enabled": true,
+			"TargetAllowList": [
+				"Editor"
+			]
+		}
+	]
 }
