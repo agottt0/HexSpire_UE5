@@ -53,7 +53,22 @@ namespace
 		H.BaseCRIT = 10;
 
 		H.EnergyMax = 5;
-		H.CardsDrawnPerTurn = 5;
+
+		// ⚠️ 抽牌数 5 → 3，这是基石卡移出牌堆后的【必要配套】。
+		//
+		//    基石卡常驻后，牌堆里只剩 5 张构筑卡（满容量也只有 8 张）。
+		//    仍抽 5 张的话，每回合把整个卡组抽光：
+		//      · 抽牌不再有随机性 → D2 的"概率可推算"没有了对象
+		//      · 每回合都在洗牌 → 弃牌堆信息失去意义
+		//      · 构筑深度归零 → 拿到什么卡都一样，D3 白做
+		//    这个问题由验证器抓到（《薄刃契》+1 抽牌后应有 6 张，
+		//    实测只有 5 张 —— 因为整个卡组就 5 张）。
+		//
+		//    3 张时：起始 5 张卡撑 1.67 回合，满容量 8 张撑 2.67 回合，
+		//    与原设计（8张/抽5、11张/抽5）的洗牌节奏基本一致。
+		//    玩家每回合的选项 = 3 手牌 + 3 常驻固定卡 = 6 个，
+		//    配 5 点体力仍然充裕。
+		H.CardsDrawnPerTurn = 3;
 
 		// 基石三张：盾击（专属变体）+ 防御 + 移动
 		H.CornerstoneCardIds = { TEXT("shield_bash"), TEXT("def_basic"), TEXT("move_basic") };
@@ -245,16 +260,22 @@ namespace
 		// 《冲撞》：位移即伤害（§8.6）
 		// ⚠️ 伤害曾是 ATK×0.4 = 3 点，是废牌。现在 ATK×0.7 + 击退撞墙额外 8 点
 		//   （HexK::WallSlamDamage）→ 把敌人推到墙上或尖刺里成为真正的战术选择。
+		//
+		// ⚠️ TargetSpec 必须是 DashPath，不能用 MakeTile。
+		//    用 Tile 时波及格只有落点自己，而落点又必须是空格 ——
+		//    后面两步（伤害、击退）永远找不到目标，冲撞等于只会跑位。
+		//    DashPath 把整条路径都算作波及格，沿途敌人才吃得到。
 		Out.Add(MakeCard(
 			TEXT("charge"), TEXT("冲撞"), EHexCardType::Attack, 1,
-			FHexTargetSpec::MakeTile(1, 3),
+			FHexTargetSpec::MakeDashPath(1, 3),
 			{
 				FHexEffectStep::MakeDash(3),
 				FHexEffectStep::MakeDamage(0.0f, CardStatAtk, 0.7f),
 				FHexEffectStep::MakeKnockback(2),
 			},
 			{ TEXT("位移"), TEXT("近战") },
-			TEXT("突进最多 3 格，造成 {dmg} 点伤害并击退 {kb} 格（撞墙额外 8 点）。")));
+			TEXT("冲向 3 格内的空地，穿过沿途敌人并各造成 {dmg} 点伤害，"
+				 "击退 {kb} 格（撞墙额外 8 点）。")));
 
 		// 《点燃》：唯一的状态施加牌，是燃烧机制的入口
 		Out.Add(MakeCard(
@@ -393,16 +414,39 @@ namespace
 	}
 }
 
-void FHexContentLibrary::BuildStartingDeck(const FHexHeroData& Hero, TArray<FHexCardInstance>& OutDeck)
+void FHexContentLibrary::BuildStartingDeck(
+	const FHexHeroData& Hero,
+	TArray<FHexCardInstance>& OutDeck,
+	TArray<FHexCardInstance>& OutFixedCards)
 {
 	OutDeck.Reset();
+	OutFixedCards.Reset();
 
+	// ── 固定卡：基石卡，常驻不入牌堆
+	//
+	// uid 用独立段（FixedCardUidBase 起）。卡组从 1 起递增，
+	// 装备注入的衍生卡用运行时计数器 —— 三个分配器互不知情，
+	// 不分段迟早撞号，而撞号会让"点 A 卡结算成 B 卡"。
+	{
+		int32 NextFixedUid = HexK::FixedCardUidBase;
+		for (const FName& Cid : Hero.CornerstoneCardIds)
+		{
+			if (FindCard(Cid) == nullptr)
+			{
+				ensureMsgf(false, TEXT("BuildStartingDeck: 未知基石卡 id %s"), *Cid.ToString());
+				continue;
+			}
+
+			FHexCardInstance Inst;
+			Inst.Uid = NextFixedUid++;
+			Inst.CardId = Cid;
+			OutFixedCards.Add(Inst);
+		}
+	}
+
+	// ── 卡组：只有技能卡等构筑内容
 	TArray<FName> Ids;
-	Ids.Append(Hero.CornerstoneCardIds);
-
-	TArray<FName> Extras;
-	StartingExtrasFor(Hero.Id, Extras);
-	Ids.Append(Extras);
+	StartingExtrasFor(Hero.Id, Ids);
 
 	// uid 从 1 开始连续分配。0 保留为"无效 uid"，
 	// 这样 FindInHand(0) 之类的调用能被安全地判为未找到。

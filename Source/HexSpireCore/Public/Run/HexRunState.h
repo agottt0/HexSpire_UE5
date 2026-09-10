@@ -124,8 +124,18 @@ public:
 	/** 卡组容量上限（层结算可 +1~2） */
 	int32 DeckCapacity = HexK::InitialDeckCapacity;
 
-	/** 完整卡组（含基石卡与装备注入的衍生卡） */
+	/** 完整卡组（只含构筑卡与装备注入的衍生卡，【不含基石卡】） */
 	TArray<FHexCardInstance> Deck;
+
+	/**
+	 * 固定卡（攻击/防御/移动）。常驻可用，不进牌堆循环。
+	 *
+	 * ⚠️ 不占卡组容量，也【不参与】掠夺/移除 —— 它们是角色的基础动作，
+	 *    不是构筑的一部分。放在这里而不是 Deck 里，
+	 *    是为了让 GetUsedCapacity() 这类按 Deck 计数的逻辑天然正确，
+	 *    不必到处写"如果是基石卡就跳过"。
+	 */
+	TArray<FHexCardInstance> FixedCards;
 
 	FHexRuneLoadout RuneLoadout;
 	FHexEquipLoadout EquipLoadout;

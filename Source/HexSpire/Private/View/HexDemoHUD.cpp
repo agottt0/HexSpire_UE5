@@ -148,6 +148,7 @@ void AHexDemoHUD::DrawHUD()
 		DrawIntentLines(Mode);
 		DrawUnitOverlays(Mode);
 		DrawHandPanel(Mode);
+		DrawFixedCardPanel(Mode);
 		DrawDamagePreview(Mode);
 		if (bShowPiles)
 		{
@@ -419,6 +420,111 @@ void AHexDemoHUD::DrawHandPanel(AHexDemoGameMode* Mode)
 		DrawTextShadowed(FString::Printf(TEXT("射程 %d-%d"),
 			Card->TargetSpec.RangeMin, Card->TargetSpec.RangeMax),
 			X + 8.0f, Y + CardH - 16.0f, ColDim, 0.85f);
+	}
+}
+
+// ══════════════════════════════════════════════════════════ 固定卡（左侧）
+
+void AHexDemoHUD::GetFixedCardRect(
+	int32 Index, const FVector2D& ViewportSize,
+	FVector2D& OutPos, FVector2D& OutSize)
+{
+	// ⚠️ 尺寸比手牌小一圈（144×74 vs 168×128）。
+	//    固定卡是【常驻】的，永远占着屏幕；做得和手牌一样大会
+	//    抢走注意力，而玩家真正需要每回合重新评估的是手牌。
+	constexpr float CardW = 144.0f;
+	constexpr float CardH = 74.0f;
+	constexpr float Gap = 8.0f;
+	constexpr float MarginX = 14.0f;
+
+	OutSize = FVector2D(CardW, CardH);
+
+	// 竖排，整体在左侧垂直居中偏下 —— 避开顶栏(74px)与图例
+	const float TotalH = 3 * CardH + 2 * Gap;
+	const float StartY = FMath::Max(96.0f, ViewportSize.Y * 0.52f - TotalH * 0.5f);
+
+	OutPos = FVector2D(MarginX, StartY + Index * (CardH + Gap));
+}
+
+void AHexDemoHUD::DrawFixedCardPanel(AHexDemoGameMode* Mode)
+{
+	const FHexBattleState* BS = Mode->GetBattleState();
+	FHexBattleFlow* Flow = Mode->GetBattleFlow();
+	if (!BS || !Flow)
+	{
+		return;
+	}
+
+	const FHexUnit* Hero = BS->GetHero();
+	const TArray<FHexCardInstance>& Fixed = BS->FixedCards;
+	if (Fixed.Num() == 0)
+	{
+		return;
+	}
+
+	const FVector2D Viewport(Canvas->SizeX, Canvas->SizeY);
+
+	// 区域标题 —— 让玩家明白这几张与手牌规则不同
+	{
+		FVector2D P, S;
+		GetFixedCardRect(0, Viewport, P, S);
+		DrawTextShadowed(TEXT("固定卡 · 常驻"), P.X, P.Y - 22.0f, ColDim, 0.9f);
+	}
+
+	for (int32 I = 0; I < Fixed.Num(); ++I)
+	{
+		const FHexCardInstance& Inst = Fixed[I];
+		const FHexCardData* Card = FHexContentLibrary::FindCard(Inst.CardId);
+		if (!Card)
+		{
+			continue;
+		}
+
+		FVector2D Pos, Size;
+		GetFixedCardRect(I, Viewport, Pos, Size);
+
+		const bool bSelected = (Mode->GetSelectedCardUid() == Inst.Uid);
+		const bool bPlayable = Flow->CanPlayCard(Inst.Uid);
+		const int32 Cost = Flow->GetCardCost(Inst.Uid);
+
+		// 与手牌一致的类型配色，玩家不需要学两套语言
+		FLinearColor Back(0.10f, 0.11f, 0.14f);
+		switch (Card->CardType)
+		{
+		case EHexCardType::Attack: Back = FLinearColor(0.22f, 0.08f, 0.08f); break;
+		case EHexCardType::Guard:  Back = FLinearColor(0.08f, 0.14f, 0.24f); break;
+		case EHexCardType::Move:   Back = FLinearColor(0.08f, 0.20f, 0.14f); break;
+		default: break;
+		}
+
+		DrawPanel(Pos.X, Pos.Y, Size.X, Size.Y, Back, bPlayable ? 0.95f : 0.45f);
+		DrawSolidBox(Pos.X, Pos.Y, Size.X, Size.Y,
+			bSelected ? ColWarn : (bPlayable ? FLinearColor(0.45f, 0.48f, 0.52f)
+				: FLinearColor(0.22f, 0.22f, 0.24f)),
+			bSelected ? 3.0f : 1.0f);
+
+		// 快捷键：Q/W/E —— 与手牌的数字键分开，避免选错
+		const TCHAR* Keys[] = { TEXT("Q"), TEXT("W"), TEXT("E") };
+		if (I < 3)
+		{
+			DrawTextShadowed(Keys[I], Pos.X + 6.0f, Pos.Y + 4.0f, ColDim);
+		}
+
+		DrawTextShadowed(FString::Printf(TEXT("%d"), Cost),
+			Pos.X + Size.X - 20.0f, Pos.Y + 4.0f,
+			bPlayable ? ColEnergy : ColBad, 1.15f);
+
+		DrawTextShadowed(Card->DisplayName, Pos.X + 24.0f, Pos.Y + 4.0f,
+			bPlayable ? ColText : ColDim, 1.0f);
+
+		// 只显示一行摘要：常驻卡玩家早就背下来了，不需要完整描述
+		const FString Desc = Card->RenderDescription(Hero);
+		DrawTextShadowed(Desc.Left(13), Pos.X + 8.0f, Pos.Y + 28.0f,
+			bPlayable ? FLinearColor(0.82f, 0.84f, 0.86f) : ColDim, 0.85f);
+
+		DrawTextShadowed(FString::Printf(TEXT("射程 %d-%d"),
+			Card->TargetSpec.RangeMin, Card->TargetSpec.RangeMax),
+			Pos.X + 8.0f, Pos.Y + Size.Y - 18.0f, ColDim, 0.8f);
 	}
 }
 
@@ -816,10 +922,16 @@ void AHexDemoHUD::DrawPileBrowser(AHexDemoGameMode* Mode)
 void AHexDemoHUD::DrawLegend()
 {
 	// 灰盒期必须有图例：颜色的含义无法从画面本身推断
-	const float X = 12.0f;
 	const float H = 148.0f;
-	const float Y = Canvas->SizeY * 0.5f - H * 0.5f;
 	const float W = 196.0f;
+
+	// ⚠️ 图例放【右侧】。
+	//    它原本在左侧垂直居中，与后加的固定卡区完全重叠 ——
+	//    实测截图里《防御》被图例整个盖住，玩家看不到也点不准。
+	//    让图例让位而不是挪固定卡：固定卡要点击、要肌肉记忆，
+	//    位置必须稳定；图例只是静态参考，放哪都行。
+	const float X = Canvas->SizeX - W - 12.0f;
+	const float Y = Canvas->SizeY * 0.5f - H * 0.5f;
 
 	DrawPanel(X, Y, W, H, ColPanel, 0.72f);
 
@@ -845,8 +957,10 @@ void AHexDemoHUD::DrawLegend()
 void AHexDemoHUD::DrawHelp(AHexDemoGameMode* Mode)
 {
 	const FString Help = Mode->IsInBattle()
-		? TEXT("数字键选牌 · 左键点黄格出牌 · 右键取消 · 空格结束回合 · Tab 看牌堆 · R 重开")
+		? TEXT("数字键选手牌 · QWE(或点击)选固定卡 · 左键点黄格出牌 · 右键取消 · 空格结束回合 · Tab 看牌堆 · R 重开")
 		: TEXT("数字键选择房间 · Enter 确认 · R 重开一局");
 
+	// ⚠️ 提示行原本贴在手牌上方(SizeY-158)。固定卡区在左侧，
+	//    两者不重叠，位置不用动。
 	DrawTextShadowed(Help, 12.0f, Canvas->SizeY - 158.0f, ColDim, 0.88f);
 }

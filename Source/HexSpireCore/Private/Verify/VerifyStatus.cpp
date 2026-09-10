@@ -430,7 +430,8 @@ namespace
 		}
 
 		TArray<FHexCardInstance> Deck;
-		FHexContentLibrary::BuildStartingDeck(*Hero, Deck);
+		TArray<FHexCardInstance> Fixed;
+		FHexContentLibrary::BuildStartingDeck(*Hero, Deck, Fixed);
 
 		// ── 不变量：四区之和 = 全集
 		//

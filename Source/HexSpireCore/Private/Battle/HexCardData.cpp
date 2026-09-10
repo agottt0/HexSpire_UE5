@@ -161,6 +161,21 @@ FHexTargetSpec FHexTargetSpec::MakeTile(int32 InRangeMin, int32 InRangeMax)
 	return T;
 }
 
+FHexTargetSpec FHexTargetSpec::MakeDashPath(int32 InRangeMin, int32 InRangeMax)
+{
+	FHexTargetSpec T;
+	T.Shape = EHexTargetShape::DashPath;
+	T.RangeMin = InRangeMin;
+	T.RangeMax = InRangeMax;
+	// ⚠️ bRequiresLineOfSight 必须为 false。
+	//    视线判定把【单位】也算作遮挡物之外，还会因石柱直接否决目标；
+	//    冲撞需要的是"墙挡、人不挡"，这条规则由 LegalCells 里的
+	//    DashPath 分支自己实现，不能借用视线。
+	T.bRequiresLineOfSight = false;
+	T.bCanTargetEmptyCell = true;
+	return T;
+}
+
 // ───────────────────────────────────────────────────────── FHexCardData
 
 FString FHexCardData::RenderDescription(const FHexUnit* Source) const

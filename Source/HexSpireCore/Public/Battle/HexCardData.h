@@ -122,6 +122,29 @@ struct HEXSPIRECORE_API FHexTargetSpec
 		int32 InAreaSize = 0,
 		bool bLoS = true);
 	static FHexTargetSpec MakeTile(int32 InRangeMin, int32 InRangeMax);
+
+	/**
+	 * 冲撞：落点可站立、路径不被墙堵死、允许穿过单位。
+	 * 波及格 = 整条路径（沿途敌人都会吃到后续的伤害步骤）。
+	 */
+	static FHexTargetSpec MakeDashPath(int32 InRangeMin, int32 InRangeMax);
+
+	/**
+	 * 是否以【格子】为目标（而非以单位为目标）。
+	 *
+	 * ⚠️ 判断"这是不是一张位移卡"请一律用这个方法，
+	 *    不要在业务代码里手写 `Shape == Tile`。
+	 *    加入 DashPath 时，散落各处的手写判断漏了三处：
+	 *      · 验证套件的接敌逻辑   → 机器人不再冲锋，对风筝敌人永久僵持
+	 *      · 试玩机器人的走位逻辑 → 不再用冲撞躲避
+	 *      · 试玩机器人的接敌逻辑 → 同上
+	 *    这些都不会报错，只会让 AI 悄悄变笨，极难察觉。
+	 */
+	bool TargetsCell() const
+	{
+		return Shape == EHexTargetShape::Tile
+			|| Shape == EHexTargetShape::DashPath;
+	}
 };
 
 /** 卡牌定义（§15.3） */

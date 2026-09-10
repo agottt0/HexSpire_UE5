@@ -8,6 +8,7 @@
 #include "Battle/HexBattleState.h"
 #include "Battle/HexBattleFlow.h"
 #include "Battle/HexUnit.h"
+#include "Battle/HexRuleBook.h"
 #include "Content/HexContentLibrary.h"
 #include "Content/HexLayouts.h"
 #include "Hex/HexCoord.h"
@@ -195,7 +196,12 @@ namespace
 	 */
 	bool BotPlayOne(FHexBattleFlow& Flow, FHexBattleState& S)
 	{
-		const TArray<FHexCardInstance> Hand = S.Piles.GetHand();
+		// ⚠️ 可选牌 = 手牌 + 固定卡（基石卡已移出牌堆循环）。
+		//    漏掉固定卡的话，机器人不会移动也不会防御，
+		//    跑出来的难度数据会严重偏难，且看不出原因。
+		TArray<FHexCardInstance> Hand = S.Piles.GetHand();
+		Hand.Append(S.FixedCards);
+
 		const FHexUnit* Hero = S.GetHero();
 
 		// ── ① 走位躲避
@@ -214,7 +220,7 @@ namespace
 				for (const FHexCardInstance& C : Hand)
 				{
 					const FHexCardData* Card = FHexContentLibrary::FindCard(C.CardId);
-					if (!Card || Card->TargetSpec.Shape != EHexTargetShape::Tile
+					if (!Card || !Card->TargetSpec.TargetsCell()
 						|| !Flow.CanPlayCard(C.Uid))
 					{
 						continue;
@@ -247,12 +253,34 @@ namespace
 		}
 
 		// ── ② 挡不住就先买格挡
+		//
+		// ══════════════════════════════════════════════════════════
+		// ⚠️ 这里的两个闸门是【常驻固定卡引入后必须加的】
+		// ══════════════════════════════════════════════════════════
+		// 《防御》从手牌卡变成常驻固定卡后，它【永远可打】。
+		// 而原判据只有 "Shield < Incoming"：
+		// 当来袭伤害超过格挡上限（镇妖者 20 点）时这个条件恒成立，
+		// 机器人于是把 5 点体力全买成格挡、一次攻击都不出，
+		// 被慢慢耗死 —— 实测抵达 Boss 率从 ≥80% 掉到 71%。
+		//
+		// 这正是本文件开头注释记录过的老陷阱（"早期版本把体力
+		// 全花在《防御》《铁壁》上"）的复发：当时靠"手牌里防御卡
+		// 数量有限"兜住，常驻化之后那个天然限制没有了。
 		if (Hero)
 		{
 			const int32 Incoming = IncomingDamageThisRound(S);
 			const int32 Shield = Hero->Block;
 
-			if (Incoming > 0 && Shield < Incoming)
+			// 闸门一：格挡已经顶到上限，再买是纯浪费
+			const bool bCapReached = Shield >= Hero->GetBlockCap();
+
+			// 闸门二：至少留一半体力用于输出。
+			//        不留的话，"打不死敌人 → 敌人一直打我 → 继续买格挡"
+			//        会形成自锁，战斗拖到回合上限也分不出胜负。
+			const int32 EnergyFloor = FHexRuleBook::EnergyMax(S) / 2;
+			const bool bEnergyReserved = S.Energy <= EnergyFloor;
+
+			if (Incoming > 0 && Shield < Incoming && !bCapReached && !bEnergyReserved)
 			{
 				for (const FHexCardInstance& C : Hand)
 				{
@@ -309,7 +337,7 @@ namespace
 				for (const FHexCardInstance& C : Hand)
 				{
 					const FHexCardData* Card = FHexContentLibrary::FindCard(C.CardId);
-					if (!Card || Card->TargetSpec.Shape != EHexTargetShape::Tile
+					if (!Card || !Card->TargetSpec.TargetsCell()
 						|| !Flow.CanPlayCard(C.Uid))
 					{
 						continue;
@@ -463,6 +491,9 @@ namespace
 			}
 			S.Piles.BeginBattle(Deck, S.Rng);
 		}
+
+		// 固定卡常驻，不入牌堆
+		S.FixedCards = Run.FixedCards;
 
 		FHexBattleFlow Flow(S);
 		Flow.SetCardLookup([](FName Id) { return FHexContentLibrary::FindCard(Id); });

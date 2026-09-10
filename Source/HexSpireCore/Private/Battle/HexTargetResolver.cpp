@@ -70,6 +70,42 @@ namespace
 			return OA.X < OB.X;
 		});
 	}
+
+	/**
+	 * 冲撞路径是否被地形堵死。
+	 *
+	 * ⚠️ 只看地形，【故意不看单位】—— 冲撞的核心就是穿透。
+	 *    若把单位算作阻挡，敌人往身前一站，冲撞就退化成短距离移动，
+	 *    而它是镇妖者唯一的接敌手段，废掉它等于对风筝型敌人永久僵持。
+	 *
+	 * 起点与终点不参与判定：起点是自己，终点的可站立性由 CanPlace 单独查。
+	 */
+	bool DashPathBlocked(
+		const FHexGrid& Grid, const FIntVector& From, const FIntVector& To,
+		bool bCanCrushRubble)
+	{
+		TArray<FIntVector> Path;
+		FHexCoord::Line(From, To, Path);
+
+		for (const FIntVector& C : Path)
+		{
+			if (C == From || C == To)
+			{
+				continue;
+			}
+			// 墙、深坑：撞上去停下，不能穿过
+			if (!Grid.IsWalkable(C, bCanCrushRubble))
+			{
+				return true;
+			}
+			// 石柱是齐胸的实体障碍，同样挡冲撞
+			if (Grid.FeatureAt(C) == EHexFeature::Pillar)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
 }
 
 // ───────────────────────────────────────────────────────── 合法目标格
@@ -130,8 +166,10 @@ void FHexTargetResolver::LegalCells(
 			continue;
 		}
 
-		// 不能选自己占的格（TILE 类除外，位移可能原地）
-		if (D == 0 && Spec.Shape != EHexTargetShape::Tile)
+		// 不能选自己占的格（TILE / DASH 类除外，位移可能原地）
+		if (D == 0
+			&& Spec.Shape != EHexTargetShape::Tile
+			&& Spec.Shape != EHexTargetShape::DashPath)
 		{
 			continue;
 		}
@@ -145,8 +183,9 @@ void FHexTargetResolver::LegalCells(
 
 		if (Spec.bCanTargetEmptyCell)
 		{
-			// TILE 类：目标必须是可通行的空地（用于位移/召唤/改地形）
-			if (Spec.Shape == EHexTargetShape::Tile)
+			// TILE / DASH：目标必须是可通行的空地（用于位移/召唤/改地形）
+			if (Spec.Shape == EHexTargetShape::Tile
+				|| Spec.Shape == EHexTargetShape::DashPath)
 			{
 				if (!State.Grid.IsWalkable(C, Caster.CanCrushRubble()))
 				{
@@ -156,6 +195,13 @@ void FHexTargetResolver::LegalCells(
 				if (!FHexFootprint::CanPlace(
 					State.Grid, C, Caster.GetFootprint(), Caster.Facing,
 					Caster.Id, Caster.CanCrushRubble()))
+				{
+					continue;
+				}
+				// 冲撞额外要求：路径不能被墙/石柱堵死（但允许穿人）
+				if (Spec.Shape == EHexTargetShape::DashPath
+					&& DashPathBlocked(
+						State.Grid, Caster.Anchor, C, Caster.CanCrushRubble()))
 				{
 					continue;
 				}
@@ -205,6 +251,30 @@ void FHexTargetResolver::AffectedCells(
 	case EHexTargetShape::Tile:
 		Out.Add(TargetCell);
 		break;
+
+	case EHexTargetShape::DashPath:
+	{
+		// 整条冲撞路径 = 沿途 + 落点。
+		//
+		// ⚠️ 必须【排除起点】。起点是施法者自己占的格，
+		//    留着它会让 AllInArea 过滤器把自己也算成受害者，
+		//    出现"冲撞把自己打一顿"的荒唐结果。
+		TArray<FIntVector> Path;
+		FHexCoord::Line(Caster.Anchor, TargetCell, Path);
+
+		TArray<FIntVector> OwnCells;
+		Caster.GetCells(OwnCells);
+
+		for (const FIntVector& C : Path)
+		{
+			if (OwnCells.Contains(C))
+			{
+				continue;
+			}
+			Out.Add(C);
+		}
+		break;
+	}
 
 	case EHexTargetShape::Line:
 	{

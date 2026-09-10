@@ -23,6 +23,7 @@
 #include "Battle/HexEnemyAI.h"
 #include "Battle/HexUnit.h"
 #include "Battle/HexStatusData.h"
+#include "Battle/HexTargetResolver.h"
 #include "Content/HexContentLibrary.h"
 #include "Content/HexLayouts.h"
 #include "Runes/HexRuneLibrary.h"
@@ -107,11 +108,11 @@ namespace
 
 			State->RebuildOccupancy();
 
-			// ── 卡组
+			// ── 卡组 + 固定卡
 			TArray<FHexCardInstance> Deck;
 			if (H)
 			{
-				FHexContentLibrary::BuildStartingDeck(*H, Deck);
+				FHexContentLibrary::BuildStartingDeck(*H, Deck, State->FixedCards);
 			}
 			State->Piles.BeginBattle(Deck, State->Rng);
 
@@ -157,7 +158,12 @@ namespace
 	 */
 	bool BotPlayOneCard(FHexBattleFlow& Flow, FHexBattleState& State)
 	{
-		const TArray<FHexCardInstance> Hand = State.Piles.GetHand();
+		// ⚠️ 可选牌 = 手牌 + 固定卡。
+		//    基石卡移出牌堆后，只遍历手牌的机器人会彻底失去
+		//    移动与防御能力 —— 它不会报错，只会打不过、或者
+		//    因为无法接敌而把每场战斗拖到回合上限。
+		TArray<FHexCardInstance> Hand = State.Piles.GetHand();
+		Hand.Append(State.FixedCards);
 
 		// ── ① 直接命中敌人的攻击卡
 		for (const FHexCardInstance& C : Hand)
@@ -207,7 +213,14 @@ namespace
 						}
 						const FHexCardData* Card = FHexContentLibrary::FindCard(C.CardId);
 						// 只考虑目标是格子的卡（移动/突进/冲撞）
-						if (!Card || Card->TargetSpec.Shape != EHexTargetShape::Tile)
+						//
+						// ⚠️ 用 TargetsCell() 而不是手写形状比较。
+						//    《冲撞》从 Tile 改成 DashPath 时，这里若漏改，
+						//    机器人就再也不会冲锋 —— 对风筝型敌人
+						//    （投石手每回合退到 3 格外）永远打不着，
+						//    战斗不终止，最后由 R7 安全闸兜底，
+						//    表现为"某些种子的战斗莫名其妙判和"。
+						if (!Card || !Card->TargetSpec.TargetsCell())
 						{
 							continue;
 						}
@@ -907,11 +920,11 @@ namespace
 
 			Fx.Flow->BeginBattle();
 
-			// 基线抽 5，《薄刃契》+1 → 6
-			// ⚠️ 若这里得到 8（= 起始卡组全部张数），说明外部多调了一次
-			//    BeginRound，把 8 张卡组抽干了 —— 见 RunFullBattle 的契约注释。
-			Ctx.CheckEqual(TEXT("《薄刃契》使开局手牌变 6 张"),
-				Fx.State->Piles.NumHand(), 6);
+			// 基线抽 3，《薄刃契》+1 → 4
+			// ⚠️ 基线是 3 而非 5：基石卡移出牌堆后，卡组只剩 5 张，
+			//    抽 5 会把整个卡组抽光（见 MakeWarden 的 CardsDrawnPerTurn 注释）。
+			Ctx.CheckEqual(TEXT("《薄刃契》使开局手牌变 4 张"),
+				Fx.State->Piles.NumHand(), 4);
 		}
 	}
 
@@ -1050,10 +1063,110 @@ namespace
 	}
 }
 
+// ══════════════════════════════════════════════════════════ 冲撞
+//
+// 《冲撞》曾同时存在三个缺陷，且三个都【不会报错】，只是行为不对：
+//   ① 不看目标格，沿六轴近似方向走满 3 格 → 落点与点击不符
+//   ② 逐格判定占位，遇到单位就停 → 表现为"被其他角色顶开"
+//   ③ 目标形状是 Tile，波及格只有落点（且落点必须为空）
+//      → 伤害步骤恒 0 目标，冲撞从未造成过任何伤害
+//
+// 这三条各对应下面一组断言。手工摆位而不用随机战斗，
+// 因为随机场景无法稳定复现"沿途正好站着敌人"这个关键条件。
+void CheckCharge(FHexVerifyContext& Ctx)
+{
+	const FHexCardData* Charge = FHexContentLibrary::FindCard(TEXT("charge"));
+	if (!Charge)
+	{
+		Ctx.Fail(TEXT("冲撞：卡牌存在"), TEXT("找不到 charge"));
+		return;
+	}
+
+	Ctx.Check(TEXT("冲撞：目标形状为 DashPath"),
+		Charge->TargetSpec.Shape == EHexTargetShape::DashPath,
+		FString::Printf(TEXT("Shape=%d"), static_cast<int32>(Charge->TargetSpec.Shape)));
+
+	Ctx.Check(TEXT("冲撞：被识别为格子目标卡（AI 接敌依赖）"),
+		Charge->TargetSpec.TargetsCell(), TEXT(""));
+
+	// ── 构造：英雄在 (2,4)，敌人在 (3,4)，空地在 (4,4)
+	//    冲撞 (4,4) 必须穿过 (3,4) 上的敌人。
+	FHexBattleState State(12345);
+	FHexLayouts::Build(TEXT("open_hall"), State.Grid);
+
+	const FIntVector HeroCell = FHexCoord::OffsetToCube(2, 4);
+	const FIntVector MidCell = FHexCoord::OffsetToCube(3, 4);
+	const FIntVector FarCell = FHexCoord::OffsetToCube(4, 4);
+
+	int32 EnemyId = -1;
+	{
+		FHexUnit Hero;
+		Hero.Team = EHexTeam::Player;
+		Hero.SizeClass = EHexSizeClass::S;
+		Hero.HPMax = 80;
+		Hero.HP = 80;
+		Hero.ATK = 10;
+		Hero.Anchor = HeroCell;
+		Hero.Facing = 0;
+		State.HeroUnitId = State.AddUnit(Hero);
+
+		FHexUnit Foe;
+		Foe.Team = EHexTeam::Enemy;
+		Foe.SizeClass = EHexSizeClass::S;
+		Foe.HPMax = 100;
+		Foe.HP = 100;
+		Foe.DEF = 0;
+		Foe.Anchor = MidCell;
+		Foe.Facing = 3;
+		EnemyId = State.AddUnit(Foe);
+	}
+
+	FHexBattleFlow Flow(State);
+	Flow.SetCardLookup([](FName Id) { return FHexContentLibrary::FindCard(Id); });
+
+	const FHexUnit* Hero = State.GetHero();
+	if (!Hero)
+	{
+		Ctx.Fail(TEXT("冲撞：英雄存在"), TEXT(""));
+		return;
+	}
+
+	// ── ① 合法目标：敌人身后的空格必须可选（穿人）
+	TArray<FIntVector> Legal;
+	FHexTargetResolver::LegalCells(State, *Hero, Charge->TargetSpec, Legal);
+
+	Ctx.Check(TEXT("冲撞：可以选中敌人【身后】的空格（不被单位阻挡）"),
+		Legal.Contains(FarCell),
+		FString::Printf(TEXT("合法格 %d 个"), Legal.Num()));
+
+	Ctx.Check(TEXT("冲撞：不能选中敌人占据的格（落点要站得下）"),
+		!Legal.Contains(MidCell), TEXT(""));
+
+	// ── ② 波及格：必须包含沿途的敌人格，而不只是落点
+	TArray<FIntVector> Affected;
+	FHexTargetResolver::AffectedCells(State, *Hero, Charge->TargetSpec, FarCell, Affected);
+
+	Ctx.Check(TEXT("冲撞：波及格含沿途格（缺陷③ 的核心）"),
+		Affected.Contains(MidCell),
+		FString::Printf(TEXT("波及 %d 格"), Affected.Num()));
+	Ctx.Check(TEXT("冲撞：波及格含落点"), Affected.Contains(FarCell), TEXT(""));
+	Ctx.Check(TEXT("冲撞：波及格【不含】自身起点（否则会打到自己）"),
+		!Affected.Contains(HeroCell), TEXT(""));
+
+	// ── ③ 沿途敌人确实受伤，且英雄落在点击的那一格
+	TArray<int32> Units;
+	FHexTargetResolver::AffectedUnits(
+		State, *Hero, Charge->TargetSpec, FarCell, EHexTargetFilter::Enemy, Units);
+	Ctx.Check(TEXT("冲撞：沿途敌人被算作受击目标"),
+		Units.Contains(EnemyId),
+		FString::Printf(TEXT("命中 %d 个单位"), Units.Num()));
+}
+
 bool FHexVerifySuites::VerifyBattle(FHexVerifyContext& Ctx)
 {
 	CheckPhaseFlow(Ctx);
 	CheckPlayCard(Ctx);
+	CheckCharge(Ctx);
 	CheckFullBattle(Ctx);
 	CheckDeterminism(Ctx);
 	CheckSnapshot(Ctx);

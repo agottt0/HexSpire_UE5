@@ -176,14 +176,20 @@ namespace
 			Ctx.Check(FString::Printf(TEXT("[%s] 体力与抽牌数为正"), *N),
 				H.EnergyMax > 0 && H.CardsDrawnPerTurn > 0, TEXT(""));
 
-			// ── 起始卡组
+			// ── 起始卡组 + 固定卡
 			TArray<FHexCardInstance> Deck;
-			FHexContentLibrary::BuildStartingDeck(H, Deck);
+			TArray<FHexCardInstance> Fixed;
+			FHexContentLibrary::BuildStartingDeck(H, Deck, Fixed);
 
 			Ctx.Check(FString::Printf(TEXT("[%s] 起始卡组非空"), *N),
 				Deck.Num() > 0, TEXT(""));
 
 			// uid 唯一：重复 uid 会让"打出手牌第 2 张攻击"定位到错误的卡
+			//
+			// ⚠️ 必须把【卡组与固定卡放在一起】查重。
+			//    两者由不同的分配器发号（卡组从 1、固定卡从 10000），
+			//    各自内部唯一不代表合起来唯一，而 PlayCard 只收一个 uid，
+			//    撞号就会"点 A 卡结算成 B 卡"。
 			{
 				TSet<int32> Uids;
 				bool bUnique = true;
@@ -192,7 +198,12 @@ namespace
 					if (I.Uid == 0 || Uids.Contains(I.Uid)) { bUnique = false; break; }
 					Uids.Add(I.Uid);
 				}
-				Ctx.Check(FString::Printf(TEXT("[%s] 卡实例 uid 唯一且非 0"), *N),
+				for (const FHexCardInstance& I : Fixed)
+				{
+					if (I.Uid == 0 || Uids.Contains(I.Uid)) { bUnique = false; break; }
+					Uids.Add(I.Uid);
+				}
+				Ctx.Check(FString::Printf(TEXT("[%s] 卡实例 uid 全局唯一且非 0（含固定卡）"), *N),
 					bUnique, TEXT("uid 重复或为 0 —— 0 被保留为无效 uid"));
 			}
 
@@ -220,8 +231,33 @@ namespace
 				FString::Printf(TEXT("空位=%d（占容量=%d/%d）—— 掠夺会空转"),
 					FreeSlots, CountsTowardCap, HexK::InitialDeckCapacity));
 
-			Ctx.CheckEqual(FString::Printf(TEXT("[%s] 起始卡组含 3 张基石"), *N),
-				CornerstoneInDeck, 3);
+			// ── 固定卡契约
+			//
+			// ⚠️ 基石卡必须【全部】离开抽牌堆。留一张在卡组里，
+			//    玩家就会在手牌里偶尔摸到重复的《移动》，
+			//    而左侧固定卡区同时也有一张 —— 同一张卡两个入口，
+			//    是最容易让玩家困惑的那类 bug。
+			Ctx.CheckEqual(FString::Printf(TEXT("[%s] 起始卡组【不含】基石卡"), *N),
+				CornerstoneInDeck, 0);
+
+			Ctx.CheckEqual(FString::Printf(TEXT("[%s] 固定卡 3 张"), *N),
+				Fixed.Num(), 3);
+
+			{
+				bool bAllCornerstone = Fixed.Num() > 0;
+				bool bAllInFixedRange = true;
+				for (const FHexCardInstance& I : Fixed)
+				{
+					const FHexCardData* C = FHexContentLibrary::FindCard(I.CardId);
+					if (!C || !C->bIsCornerstone) { bAllCornerstone = false; }
+					if (I.Uid < HexK::FixedCardUidBase) { bAllInFixedRange = false; }
+				}
+				Ctx.Check(FString::Printf(TEXT("[%s] 固定卡全部是基石卡"), *N),
+					bAllCornerstone, TEXT(""));
+				Ctx.Check(FString::Printf(TEXT("[%s] 固定卡 uid 落在专属号段"), *N),
+					bAllInFixedRange,
+					TEXT("固定卡 uid 必须 >= FixedCardUidBase，否则可能与卡组撞号"));
+			}
 
 			// ── 掠夺池
 			TArray<FName> Loot;

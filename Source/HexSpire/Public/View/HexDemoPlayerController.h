@@ -41,5 +41,14 @@ private:
 	/** 数字键 1..9：地图阶段选房间 / 战斗阶段选手牌 */
 	void OnNumberKey(int32 Index);
 
+	/** Q/W/E：选择左侧的固定卡 */
+	void OnFixedCardKey(int32 Index);
+
+	/**
+	 * 若光标落在固定卡上则选中它。
+	 * @return 是否命中（命中时调用方应【停止】继续做棋盘判定）
+	 */
+	bool TrySelectFixedCardAtCursor();
+
 	AHexDemoGameMode* GetDemoMode() const;
 };

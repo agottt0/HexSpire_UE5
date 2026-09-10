@@ -443,6 +443,10 @@ void AHexDemoGameMode::BeginBattleForRoom(int32 RoomId)
 		BattleState->Piles.BeginBattle(Deck, BattleState->Rng);
 	}
 
+	// ── 固定卡：直接搬过来，【不】参与洗牌
+	//    它们常驻整场战斗，屏幕左侧固定卡区就是读的这个数组。
+	BattleState->FixedCards = RunState->FixedCards;
+
 	// ── 流程
 	BattleFlow = MakeUnique<FHexBattleFlow>(*BattleState);
 	BattleFlow->SetCardLookup([](FName Id) { return FHexContentLibrary::FindCard(Id); });
@@ -464,7 +468,7 @@ void AHexDemoGameMode::BeginBattleForRoom(int32 RoomId)
 		: (Room->Type == EHexRoomType::Elite ? TEXT("精英战") : TEXT("战斗"));
 
 	StatusMessage = FString::Printf(
-		TEXT("%s 开始！腐蚀度 %d —— 左键选卡，再左键点目标；空格结束回合"),
+		TEXT("%s 开始！腐蚀度 %d —— 数字键选手牌 / QWE 选左侧固定卡，再点目标格；空格结束回合"),
 		*RoomName, RunState->Corruption);
 }
 

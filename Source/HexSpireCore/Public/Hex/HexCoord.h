@@ -130,6 +130,22 @@ struct HEXSPIRECORE_API FHexCoord
 		return Dirs[((-Facing % 6) + 6) % 6];
 	}
 
+	/**
+	 * FacingDir 的逆运算：方向索引 → 朝向。
+	 *
+	 * ⚠️ 必须走这个函数，不要手写 `facing = dirIndex`（陷阱 H1 的变体）。
+	 *    Rotate() 使 Dirs 索引【递减】，因此 facing 与 dirIndex 是
+	 *    互为相反数的关系，而不是相等。直接赋值会让单位转到镜像方向，
+	 *    背击判定跟着全错 —— 而且错得很隐蔽：6 个朝向里有 2 个恰好自洽。
+	 *
+	 *    恒等式（已由 VerifyHexCoord 断言）：
+	 *      FacingDir(FacingFromDir(i)) == Dirs[i]
+	 */
+	static FORCEINLINE int32 FacingFromDir(int32 DirIndex)
+	{
+		return ((-DirIndex % 6) + 6) % 6;
+	}
+
 	/** 朝向 Facing 的【正后方】方向索引。实测对 6 个朝向均成立。 */
 	static FORCEINLINE int32 RearDirIndex(int32 Facing)
 	{
@@ -153,6 +169,22 @@ struct HEXSPIRECORE_API FHexCoord
 	 * 修正误差最大的那一维，保证 x+y+z==0。
 	 */
 	static FIntVector CubeLerpRound(const FIntVector& A, const FIntVector& B, float T);
+
+	/**
+	 * 任意两格之间的连线（含 A 与 B），按从 A 到 B 的顺序。
+	 *
+	 * ⚠️ 与 Grid::CellsInLine 的区别很重要，别混用：
+	 *      CellsInLine(origin, dirIndex, len) —— 沿【六轴之一】走 len 格，
+	 *                                            方向必须是 6 个正方向
+	 *      Line(A, B)                        —— 连接【任意】两格，
+	 *                                            方向可以是斜的
+	 *    冲撞、穿刺这类"冲向我点的那一格、沿途都吃到"的效果必须用后者：
+	 *    前者会把斜向目标近似成某个正方向，落点与玩家点击的格子不一致 ——
+	 *    在战棋里"落点和我点的不一样"是不可接受的。
+	 *
+	 * 纯坐标运算，不看地形。地形过滤由调用方负责。
+	 */
+	static void Line(const FIntVector& A, const FIntVector& B, TArray<FIntVector>& Out);
 
 	// ───────────────────────────────────────────── 世界坐标映射（表现层隔离）
 

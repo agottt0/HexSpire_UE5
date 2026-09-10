@@ -311,7 +311,7 @@ namespace
 				TArray<FHexCardInstance> Deck;
 				if (H)
 				{
-					FHexContentLibrary::BuildStartingDeck(*H, Deck);
+					FHexContentLibrary::BuildStartingDeck(*H, Deck, S2.FixedCards);
 				}
 				S2.Piles.BeginBattle(Deck, S2.Rng);
 

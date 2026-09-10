@@ -167,7 +167,13 @@ private:
 
 	const FHexCardData* LookupCard(FName CardId) const;
 
-	/** 由手牌 uid 找到卡牌定义 */
+	/**
+	 * 由 uid 找到卡实例 —— 手牌与固定卡的统一入口。
+	 * 任何"按 uid 查卡"都必须经过它，否则固定卡会被漏掉。
+	 */
+	const struct FHexCardInstance* InstFromUid(int32 CardUid) const;
+
+	/** 由 uid 找到卡牌定义（手牌或固定卡） */
 	const FHexCardData* CardFromUid(int32 CardUid) const;
 
 	FHexBattleState& State;

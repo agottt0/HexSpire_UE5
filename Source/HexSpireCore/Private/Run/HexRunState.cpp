@@ -46,10 +46,14 @@ void FHexRunState::BeginRun(FName InHeroId, FHexRngStreams& Rng)
 	Corruption = 0;
 	Shards = 0;
 
-	// 起始卡组（3 基石 + 5 普通，留 3 空位 —— 用户决策 q18）
-	FHexContentLibrary::BuildStartingDeck(*Hero, Deck);
+	// 起始卡组：基石卡走 FixedCards（常驻），卡组只留 5 张构筑卡
+	// （留 3 空位给掠夺 —— 用户决策 q18）
+	FHexContentLibrary::BuildStartingDeck(*Hero, Deck, FixedCards);
 
 	// uid 分配器要跳过起始卡组已用的号段
+	//
+	// ⚠️ 只看 Deck 即可：固定卡用的是 HexK::FixedCardUidBase 起的
+	//    独立高位段，不与运行时分配的号段重叠。
 	NextCardUid = 1;
 	for (const FHexCardInstance& C : Deck)
 	{

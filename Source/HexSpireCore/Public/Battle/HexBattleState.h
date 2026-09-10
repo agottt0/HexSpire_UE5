@@ -67,6 +67,27 @@ public:
 	FHexPileManager Piles;
 	FHexRngStreams Rng;
 
+	/**
+	 * 固定卡：《攻击》《防御》《移动》这类基础动作。
+	 *
+	 * ══════════════════════════════════════════════════════════════
+	 * 为什么把它们从牌堆里拿出来
+	 * ══════════════════════════════════════════════════════════════
+	 * 基石卡混在抽牌堆里会造成两个问题：
+	 *   ① 它们占满手牌，把真正构筑出来的技能卡挤掉 ——
+	 *      卡组构筑（D3）的收益被稀释
+	 *   ② "这回合抽不到移动"是纯随机的挫败，而移动是基础操作，
+	 *      不该由运气决定能不能做
+	 *
+	 * 现在它们【常驻可用】，唯一的限制是体力。牌堆里只留技能卡，
+	 * 每次抽牌都是有意义的构筑结果。
+	 *
+	 * ⚠️ 固定卡【不参与】牌堆四区不变量（抽/手/弃/消耗 = 全集）。
+	 *    它们既不进抽牌堆，打出后也不进弃牌堆 —— 打完还在原地。
+	 *    因此 uid 必须与卡组 uid 分段，见 HexK::FixedCardUidBase。
+	 */
+	TArray<FHexCardInstance> FixedCards;
+
 	EHexBattlePhase Phase = EHexBattlePhase::BattleStart;
 	int32 RoundNumber = 0;
 
@@ -150,6 +171,12 @@ public:
 	/** 占据某格的单位；无则 nullptr */
 	FHexUnit* FindUnitAtCell(const FIntVector& Cell);
 	const FHexUnit* FindUnitAtCell(const FIntVector& Cell) const;
+
+	/** 按 uid 查固定卡；不是固定卡则返回 nullptr */
+	const FHexCardInstance* FindFixedCard(int32 Uid) const;
+
+	/** 该 uid 是否属于固定卡（打出后不进弃牌堆） */
+	bool IsFixedCard(int32 Uid) const { return FindFixedCard(Uid) != nullptr; }
 
 	/** 重建网格占据信息（单位增删/移动后调用） */
 	void RebuildOccupancy();

@@ -103,6 +103,29 @@ FIntVector FHexCoord::CubeLerpRound(const FIntVector& A, const FIntVector& B, fl
 		static_cast<int32>(RZ));
 }
 
+void FHexCoord::Line(const FIntVector& A, const FIntVector& B, TArray<FIntVector>& Out)
+{
+	Out.Reset();
+
+	const int32 N = Distance(A, B);
+	if (N == 0)
+	{
+		Out.Add(A);
+		return;
+	}
+
+	// ⚠️ 用 AddUnique 而不是 Add。
+	//    正好穿过两格【交界】的连线（例如恰好 45° 斜穿）会让相邻两步
+	//    round 到同一格，产生重复。重复格会让路径伤害对同一个敌人
+	//    结算两次 —— 而 AffectedUnits 的去重是按【单位】去的，
+	//    挡不住同一格重复出现导致的多次命中。
+	for (int32 I = 0; I <= N; ++I)
+	{
+		const float T = static_cast<float>(I) / static_cast<float>(N);
+		Out.AddUnique(CubeLerpRound(A, B, T));
+	}
+}
+
 FVector2D FHexCoord::OffsetToWorld2D(int32 Col, int32 Row)
 {
 	// 尖顶(pointy-top) odd-r：

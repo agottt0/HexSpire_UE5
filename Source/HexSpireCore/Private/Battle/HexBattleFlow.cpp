@@ -22,9 +22,22 @@ const FHexCardData* FHexBattleFlow::LookupCard(FName CardId) const
 	return CardLookup ? CardLookup(CardId) : nullptr;
 }
 
+const FHexCardInstance* FHexBattleFlow::InstFromUid(int32 CardUid) const
+{
+	// ⚠️ 所有"按 uid 找卡"的查询都必须走这里。
+	//    CanPlayCard / GetLegalTargets / GetAffectedCells / CardCostOf
+	//    全部依赖它 —— 漏掉固定卡的话，玩家会看到一张点不动、
+	//    没有高亮、费用显示为 0 的卡，且没有任何报错。
+	if (const FHexCardInstance* InHand = State.Piles.FindInHand(CardUid))
+	{
+		return InHand;
+	}
+	return State.FindFixedCard(CardUid);
+}
+
 const FHexCardData* FHexBattleFlow::CardFromUid(int32 CardUid) const
 {
-	const FHexCardInstance* Inst = State.Piles.FindInHand(CardUid);
+	const FHexCardInstance* Inst = InstFromUid(CardUid);
 	return Inst ? LookupCard(Inst->CardId) : nullptr;
 }
 
@@ -118,7 +131,18 @@ EHexPlayResult FHexBattleFlow::PlayCard(int32 CardUid, const FIntVector& TargetC
 		return EHexPlayResult::NotPlayerPhase;
 	}
 
+	// ── 定位卡实例：先查手牌，再查固定卡
+	//
+	// ⚠️ 顺序不能反。固定卡常驻、手牌会变，
+	//    先查数量少且稳定的手牌能让常见路径更快返回；
+	//    更重要的是语义：若将来出现同 uid（不应该，但防御性地），
+	//    手牌优先才符合"玩家点的是手上那张"的直觉。
 	const FHexCardInstance* Inst = State.Piles.FindInHand(CardUid);
+	const bool bFixedCard = (Inst == nullptr) && State.IsFixedCard(CardUid);
+	if (!Inst && bFixedCard)
+	{
+		Inst = State.FindFixedCard(CardUid);
+	}
 	if (!Inst)
 	{
 		return EHexPlayResult::CardNotInHand;
@@ -167,10 +191,21 @@ EHexPlayResult FHexBattleFlow::PlayCard(int32 CardUid, const FIntVector& TargetC
 		ExecuteStep(Step, *Card, TargetCell);
 	}
 
-	// ── 卡牌归宿：带【消耗】→ 消耗区；否则 → 弃牌堆
-	const bool bExhaust = Card->bIsExhaust
-		|| (Card->CardType == EHexCardType::Attack && FHexRuleBook::AttacksExhaust(State));
-	State.Piles.ResolvePlayedCard(CardUid, bExhaust);
+	// ── 卡牌归宿
+	//
+	// ⚠️ 固定卡【原地不动】：不进弃牌堆、不进消耗区、也不从任何地方移除。
+	//    它们本来就不在牌堆四区里，若误调 ResolvePlayedCard，
+	//    该函数会在手牌中找不到这个 uid 而返回 false（静默失败），
+	//    但更糟的情况是把一张不属于牌堆的卡塞进弃牌堆 ——
+	//    那会直接打破"四区之和 = 卡组全集"的不变量，
+	//    下一次 CheckInvariants 才报错，届时已经很难追溯来源。
+	if (!bFixedCard)
+	{
+		// 带【消耗】→ 消耗区；否则 → 弃牌堆
+		const bool bExhaust = Card->bIsExhaust
+			|| (Card->CardType == EHexCardType::Attack && FHexRuleBook::AttacksExhaust(State));
+		State.Piles.ResolvePlayedCard(CardUid, bExhaust);
+	}
 
 	if (!bExplore)
 	{
@@ -357,29 +392,42 @@ void FHexBattleFlow::ExecuteStep(
 
 	case EHexEffectOp::Dash:
 	{
-		// 突进：直线冲向目标，撞到单位即停（§8.6）
-		const int32 Dir = FHexTargetResolver::DirectionTo(*Hero, TargetCell);
-		const FIntVector D = FHexCoord::Dirs[Dir];
-
-		FIntVector Cur = Hero->Anchor;
-		for (int32 I = 0; I < FMath::Max(1, Step.Distance); ++I)
+		// 突进：冲到【玩家点击的那一格】，穿过沿途单位（§8.6）。
+		//
+		// ══════════════════════════════════════════════════════════
+		// 这里曾经有三个叠加的缺陷，改法记录在此，避免回退
+		// ══════════════════════════════════════════════════════════
+		// ① 旧实现用 DirectionTo() 把目标近似成六轴之一，再【走满】
+		//    Step.Distance 格。后果：点近处会冲过头，点斜向会冲歪，
+		//    落点和玩家点的格子对不上 —— 战棋里这是致命的。
+		// ② 旧实现逐格 CanPlace，遇到任何单位就 break 停下。
+		//    这正是"被其他角色顶开"的观感来源。
+		//    冲撞是镇妖者唯一的接敌手段，被人挡住就废了。
+		// ③ 配套的 TargetSpec 是 Tile，波及格只有落点自己，
+		//    而落点又必须是空格 —— 于是后续的伤害步骤恒定 0 目标，
+		//    冲撞【从来没有造成过伤害】。
+		//
+		// 现在：落点合法性已由 LegalCells(DashPath) 全权保证
+		//       （可站立 + 路径不被墙堵死 + 允许穿人），
+		//       这里直接移动过去即可，不再做二次阻挡判定。
+		if (TargetCell != Hero->Anchor)
 		{
-			const FIntVector Next = Cur + D;
-			if (!FHexFootprint::CanPlace(
-				State.Grid, Next, Hero->GetFootprint(), Hero->Facing,
-				Hero->Id, Hero->CanCrushRubble()))
-			{
-				break;
-			}
-			Cur = Next;
-		}
+			// 转向冲撞方向：冲过去之后背对目标是荒谬的，
+			// 而且朝向直接决定下回合的背击关系（§8.2.3）。
+			const int32 DashDir = FHexTargetResolver::DirectionTo(*Hero, TargetCell);
+			const int32 NewFacing = FHexCoord::FacingFromDir(DashDir);
 
-		if (Cur != Hero->Anchor)
-		{
-			FHexGameAction A = FHexActions::MoveUnit(Hero->Id, Cur, Hero->Facing);
+			FHexGameAction A = FHexActions::MoveUnit(
+				Hero->Id, TargetCell,
+				NewFacing >= 0 ? NewFacing : Hero->Facing);
 			A.SourceTag = SrcTag;
 			Queue.PushBack(A);
 		}
+
+		// Emit(OnMoveSelf)：冲撞也是位移，位移流符文必须能吃到
+		FHexTriggerContext Ctx;
+		Ctx.SourceUnitId = Hero->Id;
+		TriggerBus.Emit(EHexTriggerTiming::OnMoveSelf, Ctx, State, Queue);
 		break;
 	}
 
@@ -763,7 +811,7 @@ bool FHexBattleFlow::IsBattleOver() const
 
 int32 FHexBattleFlow::GetCardCost(int32 CardUid) const
 {
-	const FHexCardInstance* Inst = State.Piles.FindInHand(CardUid);
+	const FHexCardInstance* Inst = InstFromUid(CardUid);
 	if (!Inst)
 	{
 		return 0;

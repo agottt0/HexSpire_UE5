@@ -102,7 +102,23 @@ struct HEXSPIRECORE_API FHexContentLibrary
 	 *
 	 * @param OutDeck  输出卡实例（uid 从 1 开始连续分配）
 	 */
-	static void BuildStartingDeck(const FHexHeroData& Hero, TArray<struct FHexCardInstance>& OutDeck);
+	/**
+	 * 构建起始卡组与固定卡。
+	 *
+	 * ⚠️ 基石卡（攻击/防御/移动）【不再进卡组】，而是走 OutFixedCards：
+	 *    它们常驻可用、不进抽牌堆、打出后不进弃牌堆。
+	 *    这样抽到的每一张都是玩家构筑出来的技能卡，
+	 *    也不会出现"这回合没抽到移动所以走不了路"的随机挫败。
+	 *
+	 * ⚠️ 参数是两个而非一个，是【故意】的：
+	 *    改成分离式时若保留单参数版本，忘记取固定卡的调用点会
+	 *    静默得到"没有基础动作"的角色。多一个出参能让编译器
+	 *    把所有调用点逼出来。
+	 */
+	static void BuildStartingDeck(
+		const FHexHeroData& Hero,
+		TArray<struct FHexCardInstance>& OutDeck,
+		TArray<struct FHexCardInstance>& OutFixedCards);
 
 	/** 掉落池：不在起始卡组里的卡（供战斗后掉落） */
 	static void GetLootableCardIds(const FHexHeroData& Hero, TArray<FName>& Out);

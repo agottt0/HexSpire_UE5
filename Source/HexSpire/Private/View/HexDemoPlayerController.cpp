@@ -3,6 +3,7 @@
 #include "View/HexDemoPlayerController.h"
 #include "View/HexDemoGameMode.h"
 #include "View/HexBoardVisual.h"
+#include "View/HexDemoHUD.h"
 #include "Battle/HexBattleState.h"
 #include "Battle/HexBattleFlow.h"
 #include "Battle/HexUnit.h"
@@ -62,6 +63,37 @@ void AHexDemoPlayerController::SetupInputComponent()
 			[this, I]() { OnNumberKey(I); });
 		InputComponent->KeyBindings.Add(Binding);
 	}
+
+	// ── 固定卡：Q / W / E
+	//
+	// ⚠️ 刻意【不】和手牌共用数字键。
+	//    共用的话手牌张数一变，固定卡的键位就跟着漂移，
+	//    而固定卡的全部价值就在于"永远在那儿、永远是同一个键"。
+	const FKey FixedKeys[3] = { EKeys::Q, EKeys::W, EKeys::E };
+	for (int32 I = 0; I < 3; ++I)
+	{
+		FInputKeyBinding Binding(FInputChord(FixedKeys[I]), IE_Pressed);
+		Binding.KeyDelegate.GetDelegateForManualSet().BindLambda(
+			[this, I]() { OnFixedCardKey(I); });
+		InputComponent->KeyBindings.Add(Binding);
+	}
+}
+
+void AHexDemoPlayerController::OnFixedCardKey(int32 Index)
+{
+	AHexDemoGameMode* Mode = GetDemoMode();
+	if (!Mode || !Mode->IsInBattle() || Mode->IsBattleOver())
+	{
+		return;
+	}
+
+	const FHexBattleState* BS = Mode->GetBattleState();
+	if (!BS || !BS->FixedCards.IsValidIndex(Index))
+	{
+		return;
+	}
+
+	Mode->SelectCard(BS->FixedCards[Index].Uid);
 }
 
 FIntVector AHexDemoPlayerController::GetHoveredCell(bool& bValid) const
@@ -142,6 +174,14 @@ void AHexDemoPlayerController::OnLeftClick()
 		return;
 	}
 
+	// ⚠️ UI 命中测试必须在棋盘判定【之前】。
+	//    固定卡区盖在棋盘左侧上方，若先算格子，点卡会被解释成
+	//    "点了卡片背后的那一格" —— 于是玩家点《防御》却把角色移走了。
+	if (TrySelectFixedCardAtCursor())
+	{
+		return;
+	}
+
 	bool bValid = false;
 	const FIntVector Cell = GetHoveredCell(bValid);
 	if (!bValid)
@@ -152,7 +192,7 @@ void AHexDemoPlayerController::OnLeftClick()
 	const int32 Selected = Mode->GetSelectedCardUid();
 	if (Selected == 0)
 	{
-		Mode->SetStatusMessage(TEXT("先用数字键选一张手牌，再点目标格"));
+		Mode->SetStatusMessage(TEXT("先选一张卡（手牌数字键 / 固定卡 Q W E 或点击），再点目标格"));
 		return;
 	}
 
@@ -165,6 +205,49 @@ void AHexDemoPlayerController::OnLeftClick()
 	}
 
 	Mode->PlayCard(Selected, Cell);
+}
+
+bool AHexDemoPlayerController::TrySelectFixedCardAtCursor()
+{
+	AHexDemoGameMode* Mode = GetDemoMode();
+	if (!Mode || Mode->IsBattleOver())
+	{
+		return false;
+	}
+
+	const FHexBattleState* BS = Mode->GetBattleState();
+	if (!BS || BS->FixedCards.Num() == 0)
+	{
+		return false;
+	}
+
+	float MouseX = 0.0f;
+	float MouseY = 0.0f;
+	if (!GetMousePosition(MouseX, MouseY))
+	{
+		return false;
+	}
+
+	int32 SizeX = 0;
+	int32 SizeY = 0;
+	GetViewportSize(SizeX, SizeY);
+	const FVector2D Viewport(SizeX, SizeY);
+
+	for (int32 I = 0; I < BS->FixedCards.Num(); ++I)
+	{
+		FVector2D Pos, Size;
+		// 与 HUD 共用同一套布局，杜绝"画的和点的对不上"
+		AHexDemoHUD::GetFixedCardRect(I, Viewport, Pos, Size);
+
+		if (MouseX >= Pos.X && MouseX <= Pos.X + Size.X
+			&& MouseY >= Pos.Y && MouseY <= Pos.Y + Size.Y)
+		{
+			Mode->SelectCard(BS->FixedCards[I].Uid);
+			return true;
+		}
+	}
+
+	return false;
 }
 
 void AHexDemoPlayerController::OnRightClick()

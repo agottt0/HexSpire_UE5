@@ -873,20 +873,39 @@ namespace
 			}
 
 			// 基石卡不可移除
+			//
+			// ⚠️ 契约已升级：基石卡不再放进卡组，而是常驻 FixedCards。
+			//    以前靠 RemoveCardFromDeck 主动拒绝来保证"不会弄丢《攻击》"，
+			//    现在它压根不在卡组里 —— 从结构上就不可能被移除，
+			//    这比运行时判断更可靠。
 			{
-				int32 CornerstoneUid = 0;
+				int32 CornerstoneInDeck = 0;
 				for (const FHexCardInstance& C : Run.Deck)
 				{
 					const FHexCardData* D = FHexContentLibrary::FindCard(C.CardId);
 					if (D && D->bIsCornerstone)
 					{
-						CornerstoneUid = C.Uid;
+						++CornerstoneInDeck;
+					}
+				}
+				Ctx.CheckEqual(TEXT("基石卡不在卡组中（§7.2 结构性保证）"),
+					CornerstoneInDeck, 0);
+
+				// 而且必须真的存在于固定卡区 —— 否则就是"弄丢了"，
+				// 玩家会开局没有《攻击》可用。
+				bool bAllPresent = Run.FixedCards.Num() > 0;
+				for (const FHexCardInstance& C : Run.FixedCards)
+				{
+					const FHexCardData* D = FHexContentLibrary::FindCard(C.CardId);
+					if (!D || !D->bIsCornerstone)
+					{
+						bAllPresent = false;
 						break;
 					}
 				}
-				Ctx.Check(TEXT("基石卡不可移除（§7.2）"),
-					CornerstoneUid != 0 && !Run.RemoveCardFromDeck(CornerstoneUid),
-					TEXT("基石可移除 → 玩家可能失去《攻击》导致战斗无法进行"));
+				Ctx.Check(TEXT("基石卡常驻于固定卡区"),
+					bAllPresent,
+					TEXT("固定卡区缺失基石 → 玩家将没有基础动作可用"));
 			}
 		}
 

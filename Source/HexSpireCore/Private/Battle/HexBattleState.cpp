@@ -347,6 +347,23 @@ bool FHexBattleState::IsPlayerDefeated() const
 	return true;
 }
 
+const FHexCardInstance* FHexBattleState::FindFixedCard(int32 Uid) const
+{
+	// uid 为 0 是"无效"约定值，不能匹配任何卡
+	if (Uid == 0)
+	{
+		return nullptr;
+	}
+	for (const FHexCardInstance& C : FixedCards)
+	{
+		if (C.Uid == Uid)
+		{
+			return &C;
+		}
+	}
+	return nullptr;
+}
+
 // ───────────────────────────────────────────────────────── 快照
 
 TSharedPtr<FHexBattleState> FHexBattleState::Snapshot() const
@@ -360,6 +377,7 @@ void FHexBattleState::RestoreFrom(const FHexBattleState& Other)
 {
 	Grid = Other.Grid;
 	Piles = Other.Piles;
+	FixedCards = Other.FixedCards;
 	Rng = Other.Rng;
 	Phase = Other.Phase;
 	RoundNumber = Other.RoundNumber;
@@ -370,6 +388,16 @@ void FHexBattleState::RestoreFrom(const FHexBattleState& Other)
 	HeroDrawBase = Other.HeroDrawBase;
 	DeckCapacityBase = Other.DeckCapacityBase;
 	RuneLoadout = Other.RuneLoadout;
+
+	// ⚠️ 这两行是补漏，不是新功能。
+	//    原先只复制 RuneLoadout 与 RuleAggregate，漏了装备与英雄被动。
+	//    平时看不出问题（RuleAggregate 已是算好的缓存），
+	//    但只要在快照之后有任何一处调用 RebuildRuleAggregate()，
+	//    装备加成与镇妖者被动就会【凭空消失】——
+	//    表现为"读档后角色变弱了"，且不报任何错。
+	EquipLoadout = Other.EquipLoadout;
+	HeroPassiveRules = Other.HeroPassiveRules;
+
 	RuleAggregate = Other.RuleAggregate;
 	FloorIndex = Other.FloorIndex;
 	Corruption = Other.Corruption;
@@ -387,6 +415,18 @@ void FHexBattleState::Serialize(FArchive& Ar)
 	Grid.Serialize(Ar);
 	Piles.Serialize(Ar);
 	Rng.Serialize(Ar);
+
+	// 固定卡：不进牌堆，但要存档 —— 否则读档后基础动作全没了
+	int32 FixedCount = FixedCards.Num();
+	Ar << FixedCount;
+	if (Ar.IsLoading())
+	{
+		FixedCards.SetNum(FixedCount);
+	}
+	for (FHexCardInstance& C : FixedCards)
+	{
+		C.Serialize(Ar);
+	}
 
 	uint8 P = static_cast<uint8>(Phase);
 	Ar << P;

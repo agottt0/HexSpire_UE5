@@ -40,11 +40,26 @@ public:
 
 	virtual void DrawHUD() override;
 
+	/**
+	 * 固定卡区中第 Index 张卡的屏幕矩形。
+	 *
+	 * ⚠️ 这是【绘制与点击判定的唯一布局来源】。
+	 *    HUD 负责画、PlayerController 负责命中测试，
+	 *    两边若各写一套坐标，改动其一就会出现
+	 *    "看到的卡和点到的卡错位" —— 这类 bug 看起来像是随机失灵，
+	 *    实际排查要对着像素量半天。
+	 */
+	static void GetFixedCardRect(
+		int32 Index, const FVector2D& ViewportSize,
+		FVector2D& OutPos, FVector2D& OutSize);
+
 private:
 	// ── 分区绘制
 	void DrawTopBar(AHexDemoGameMode* Mode);
 	void DrawMapPanel(AHexDemoGameMode* Mode);
 	void DrawHandPanel(AHexDemoGameMode* Mode);
+	/** 屏幕左侧的常驻固定卡（攻击/防御/移动） */
+	void DrawFixedCardPanel(AHexDemoGameMode* Mode);
 	void DrawUnitOverlays(AHexDemoGameMode* Mode);
 	void DrawIntentLines(AHexDemoGameMode* Mode);
 	void DrawDamagePreview(AHexDemoGameMode* Mode);
