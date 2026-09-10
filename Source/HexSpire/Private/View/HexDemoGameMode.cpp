@@ -71,6 +71,30 @@ void AHexDemoGameMode::StartPlay()
 
 	// 用时间做种子，每次启动都是新局
 	StartNewRun(0);
+
+	// ── 自检开关：-HexAutoRoom
+	//
+	// ⚠️ 存在的理由是【表现层没法用单元测试覆盖】。
+	//    单位的模型/动画只在进入战斗后才装配，而进战斗需要点鼠标。
+	//    没有这个开关，每次改表现层都得手动开编辑器点一遍，
+	//    "资产悄悄回退成灰盒"这类问题就会漏到很后面才发现。
+	//    加上它之后，一条命令行就能验证整条链路。
+	if (FParse::Param(FCommandLine::Get(), TEXT("HexAutoRoom")))
+	{
+		TArray<FHexRoomChoice> Choices;
+		GetRoomChoices(Choices);
+
+		if (Choices.Num() > 0)
+		{
+			UE_LOG(LogHexSpire, Display,
+				TEXT("[自检] 自动进入房间 %d"), Choices[0].RoomId);
+			EnterRoom(Choices[0].RoomId);
+		}
+		else
+		{
+			UE_LOG(LogHexSpire, Error, TEXT("[自检] 没有可进入的房间"));
+		}
+	}
 }
 
 void AHexDemoGameMode::SetupCamera()
@@ -451,6 +475,28 @@ bool AHexDemoGameMode::PlayCard(int32 CardUid, const FIntVector& TargetCell)
 		return false;
 	}
 
+	// ⚠️ 必须在 PlayCard 之【前】取卡牌类型。
+	//    打出后这张卡就离开手牌进了弃牌堆（或被消耗），
+	//    事后再查会查不到 —— 然后动画就永远不播，
+	//    而且不报任何错，很难想到是时序问题。
+	EHexCardType PlayedType = EHexCardType::Skill;
+	bool bKnowType = false;
+	if (BattleState)
+	{
+		for (const FHexCardInstance& C : BattleState->Piles.GetHand())
+		{
+			if (C.Uid == CardUid)
+			{
+				if (const FHexCardData* Def = FHexContentLibrary::FindCard(C.CardId))
+				{
+					PlayedType = Def->CardType;
+					bKnowType = true;
+				}
+				break;
+			}
+		}
+	}
+
 	const EHexPlayResult R = BattleFlow->PlayCard(CardUid, TargetCell);
 
 	switch (R)
@@ -459,6 +505,10 @@ bool AHexDemoGameMode::PlayCard(int32 CardUid, const FIntVector& TargetCell)
 		SelectedCardUid = 0;
 		CachedLegalTargets.Reset();
 		RefreshVisuals();
+		if (bKnowType)
+		{
+			PlayHeroCardAnim(PlayedType);
+		}
 		return true;
 
 	case EHexPlayResult::NotEnoughEnergy:
@@ -701,6 +751,40 @@ void AHexDemoGameMode::RefreshHighlights()
 }
 
 // ══════════════════════════════════════════════════════════ 可视化同步
+
+void AHexDemoGameMode::PlayHeroCardAnim(EHexCardType Type)
+{
+	// ⚠️ 为什么"出手"必须由流程层显式触发，而"受击"不用：
+	//    受击可以从掉血差分出来（表现层自己比对上一次的 HP）。
+	//    但出手不行 —— 打空、被闪避、纯 buff 卡时没有任何状态变化，
+	//    表现层无从得知玩家刚刚做了什么。
+	if (!BattleState)
+	{
+		return;
+	}
+
+	AHexUnitVisual** V = UnitVisuals.Find(BattleState->HeroUnitId);
+	if (!V || !*V)
+	{
+		return;
+	}
+
+	switch (Type)
+	{
+	case EHexCardType::Attack:
+		(*V)->PlayOneShot(EHexUnitAnim::Attack);
+		break;
+	case EHexCardType::Guard:
+		// 守备暂时也用挥击动作 —— 模板的 AS_Defend 是"举盾站定"的
+		// 循环姿态，一次性播完会立刻弹回 Idle，看起来像抽搐。
+		// 要用它得改成"保持到回合结束"，属于状态而非动作，先不做。
+		(*V)->PlayOneShot(EHexUnitAnim::Attack);
+		break;
+	default:
+		(*V)->PlayOneShot(EHexUnitAnim::Cast);
+		break;
+	}
+}
 
 void AHexDemoGameMode::ClearUnitVisuals()
 {

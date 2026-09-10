@@ -133,6 +133,15 @@ private:
 	/** 销毁全部单位 Actor */
 	void ClearUnitVisuals();
 
+	/**
+	 * 让英雄播出手动作。
+	 *
+	 * ⚠️ 受击动画不在这里 —— 那个由表现层从掉血差分自行触发，
+	 *    逻辑层不需要知道表现层的存在（纪律 3）。
+	 *    出手则必须显式通知：打空/纯 buff 卡时状态无变化，推不出来。
+	 */
+	void PlayHeroCardAnim(EHexCardType Type);
+
 	/** 摆好锁死的相机 */
 	void SetupCamera();
 

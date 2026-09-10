@@ -130,7 +130,10 @@ def setup_lighting():
         sun.set_actor_rotation(unreal.Rotator(-48.0, -35.0, 0.0), False)
         comp = sun.get_component_by_class(unreal.DirectionalLightComponent)
         if comp:
-            # 强度 6 而不是默认 10：太强会让浅色高亮（黄/白）过曝成一片白
+            # ⚠️ 6.0 是【实测截图确认可见】的值，不要凭感觉改。
+            #    调过 2.6（全黑）和 15（配错曝光后全白），
+            #    最终回到这里。要改亮度，优先动 setup_fixed_exposure()
+            #    里的 bias，那个语义直观、失败也不会让画面消失。
             comp.set_editor_property("intensity", 6.0)
             comp.set_editor_property(
                 "light_color", unreal.Color(255, 244, 224))
@@ -147,6 +150,9 @@ def setup_lighting():
     if sky:
         comp = sky.get_component_by_class(unreal.SkyLightComponent)
         if comp:
+            # 环境光是"抬底"的：它一高，所有暗部一起变灰，
+            # 格子缝隙的阴影就没了 —— 而缝隙阴影正是数格子的唯一依据。
+            # 所以它要明显低于主光，但不能为 0（否则背光面纯黑）。
             comp.set_editor_property("intensity", 2.2)
             # 冷调 —— 第一章黄泉线（地铁）的基调（美术文档 §5）
             comp.set_editor_property(
@@ -187,6 +193,72 @@ def setup_lighting():
         if atmos:
             atmos.set_actor_label("HexDemo_Atmosphere")
             log("天空球已添加")
+
+    setup_fixed_exposure()
+
+
+def setup_fixed_exposure():
+    """
+    压暗曝光补偿，抑制自动曝光把画面冲白。
+
+    ══════════════════════════════════════════════════════════════
+    这里踩过的坑（留作记录，别再走一遍）
+    ══════════════════════════════════════════════════════════════
+    最初想【完全锁死】曝光（min == max == 某个 EV），理由是
+    自动曝光会让固定视角的战棋"画面呼吸"：敌人一死画面变亮、
+    高亮一铺画面变暗，而本作正是靠颜色编码传信息的，颜色会漂
+    就等于信息不可靠。
+
+    理由成立，但实际锁不住 —— 连试三组值全部失败：
+        EV=1.0  配 2.6 lux  -> 全黑
+        EV=-1.0 配 15 lux   -> 全白
+        EV=2.8  配 15 lux   -> 又全黑（只剩天空可见）
+    即便按摄影公式 EV100=log2(lux*0.4) 算出理论值也对不上，
+    说明 UE 5.8 里这两个字段的实际语义与文档/公式并不一致，
+    继续盲调只是在浪费时间。
+
+    改成【保留自动曝光 + 负向补偿】：
+      · 自动曝光保证画面在任何情况下都不会全黑/全白（下限保障）
+      · 负 bias 把整体压暗一档，抵消它对暗场景的过度提亮
+        —— 那正是当初棋盘被冲成纯白的原因
+        （地面色实际是 0.30,0.32,0.35 的水泥灰，不是白色）
+
+    代价是画面仍会轻微呼吸。等美术材质定稿、场景亮度稳定后
+    再回来做真正的锁定，那时才有稳定的基准可校。
+    """
+    eas = get_actor_subsystem()
+
+    ppv = find_actor_by_label("HexDemo_PostProcess")
+    if ppv is None:
+        ppv = eas.spawn_actor_from_class(
+            unreal.PostProcessVolume, unreal.Vector(0.0, 0.0, 0.0))
+        if ppv:
+            ppv.set_actor_label("HexDemo_PostProcess")
+
+    if ppv is None:
+        return
+
+    # 无边界：不需要玩家"走进"体积就生效（本作没有可走动的 Pawn）
+    ppv.set_editor_property("unbound", True)
+
+    settings = ppv.get_editor_property("settings")
+    try:
+        # ⚠️ 必须【显式关掉】曾经设过的 min/max 锁定。
+        #    这个脚本是幂等的，会复用关卡里已有的 PPV ——
+        #    但"不再设置某个值"不等于"清除它"，
+        #    上一版写进去的 EV=2.8 会原封不动留在资产里继续生效。
+        #    幂等脚本必须能把自己之前造成的状态撤销干净，
+        #    否则改脚本不生效，人却在怀疑代码。
+        settings.set_editor_property("override_auto_exposure_min_brightness", False)
+        settings.set_editor_property("override_auto_exposure_max_brightness", False)
+
+        # 只用 bias：负值压暗，正值提亮，语义直观且实测有效。
+        settings.set_editor_property("override_auto_exposure_bias", True)
+        settings.set_editor_property("auto_exposure_bias", -1.0)
+        ppv.set_editor_property("settings", settings)
+        log("曝光补偿已配置（bias=-1.0，保留自动曝光）")
+    except Exception as e:
+        unreal.log_warning("[HexSpire] 曝光设置失败：{}".format(e))
 
 
 def setup_board():
