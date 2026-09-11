@@ -40,26 +40,29 @@ public:
 
 	virtual void DrawHUD() override;
 
-	/**
-	 * 固定卡区中第 Index 张卡的屏幕矩形。
-	 *
-	 * ⚠️ 这是【绘制与点击判定的唯一布局来源】。
-	 *    HUD 负责画、PlayerController 负责命中测试，
-	 *    两边若各写一套坐标，改动其一就会出现
-	 *    "看到的卡和点到的卡错位" —— 这类 bug 看起来像是随机失灵，
-	 *    实际排查要对着像素量半天。
-	 */
-	static void GetFixedCardRect(
-		int32 Index, const FVector2D& ViewportSize,
-		FVector2D& OutPos, FVector2D& OutSize);
+	// ⚠️ GetFixedCardRect 已删除。
+	//    固定卡改为 UMG 控件后，布局由 Slate 持有，
+	//    命中测试也由 Slate 做（见 UHexCardWidget::NativeOnMouseButtonDown）。
+	//    保留一个"HUD 与 PlayerController 各算一遍矩形"的接口
+	//    只会让两套坐标再次分叉。
 
 private:
 	// ── 分区绘制
 	void DrawTopBar(AHexDemoGameMode* Mode);
 	void DrawMapPanel(AHexDemoGameMode* Mode);
-	void DrawHandPanel(AHexDemoGameMode* Mode);
-	/** 屏幕左侧的常驻固定卡（攻击/防御/移动） */
-	void DrawFixedCardPanel(AHexDemoGameMode* Mode);
+
+	/**
+	 * 确保手牌控件已创建并加进视口。
+	 *
+	 * ⚠️ 手牌与固定卡已改为 UMG（UHexHandPanelWidget），
+	 *    不再由 DrawHUD 画。原因见 HexHandPanelWidget.h：
+	 *    卡牌需要圆角/遮罩/贴图分层，Canvas 做不到。
+	 *
+	 * ⚠️ 命中测试也随之交给 Slate。原本 HUD 画矩形、
+	 *    PlayerController 手算同一套矩形，两边各写一遍坐标 ——
+	 *    改动其一就会"看到的卡和点到的卡错位"。现在只有一个来源。
+	 */
+	void EnsureHandPanel(AHexDemoGameMode* Mode);
 	void DrawUnitOverlays(AHexDemoGameMode* Mode);
 	void DrawIntentLines(AHexDemoGameMode* Mode);
 	void DrawDamagePreview(AHexDemoGameMode* Mode);
@@ -82,6 +85,10 @@ private:
 
 	UPROPERTY()
 	class UFont* HudFont = nullptr;
+
+	/** 手牌 + 固定卡的 UMG 容器。首次 DrawHUD 时创建。 */
+	UPROPERTY()
+	class UHexHandPanelWidget* HandPanel = nullptr;
 
 	/** Tab 展开的牌堆浏览器（§13.2 硬需求 4） */
 	bool bShowPiles = false;

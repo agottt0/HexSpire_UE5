@@ -60,7 +60,14 @@ namespace
 	 * ⚠️ 用 BasicShapeMaterial 而不是自建材质 —— 它支持 Color 参数，
 	 *    可以做成动态材质实例改颜色，且【不需要创建任何 .uasset】。
 	 */
-	const TCHAR* BasicMatPath = TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial");
+	// ⚠️ static 是必须的，不是风格问题。
+	//    HexBoardVisual.cpp 里有同名的 BasicMatPath，两者都在匿名命名空间里，
+	//    但 const TCHAR* 在命名空间作用域仍是【外部链接】——
+	//    unity build 把这两个 .cpp 合进同一个编译单元时就会重定义报错。
+	//    加 static 给它内部链接，各自独立。
+	//    这个 bug 是潜伏的：只有当 unity 的分组恰好把两者放到一起才炸，
+	//    所以新增一个无关的 .cpp 都可能把它触发出来。
+	static const TCHAR* BasicMatPath = TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial");
 
 	/**
 	 * Mannequin 的原始身高（uu）。实测值，见 probe_template_assets.py。

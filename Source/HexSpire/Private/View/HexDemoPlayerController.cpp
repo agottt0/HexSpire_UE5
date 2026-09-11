@@ -174,13 +174,12 @@ void AHexDemoPlayerController::OnLeftClick()
 		return;
 	}
 
-	// ⚠️ UI 命中测试必须在棋盘判定【之前】。
-	//    固定卡区盖在棋盘左侧上方，若先算格子，点卡会被解释成
-	//    "点了卡片背后的那一格" —— 于是玩家点《防御》却把角色移走了。
-	if (TrySelectFixedCardAtCursor())
-	{
-		return;
-	}
+	// ⚠️ 卡牌的命中测试【已交给 Slate】（UHexCardWidget）。
+	//    这里不再手算矩形 —— 原本 HUD 画一套坐标、这里算一套坐标，
+	//    改动其一就会出现"看到的卡和点到的卡错位"。
+	//
+	//    落在卡牌上的点击会被控件消费（返回 Handled），根本不会
+	//    走到这个函数；能走到这里的就是真正落在棋盘上的点击。
 
 	bool bValid = false;
 	const FIntVector Cell = GetHoveredCell(bValid);
@@ -205,49 +204,6 @@ void AHexDemoPlayerController::OnLeftClick()
 	}
 
 	Mode->PlayCard(Selected, Cell);
-}
-
-bool AHexDemoPlayerController::TrySelectFixedCardAtCursor()
-{
-	AHexDemoGameMode* Mode = GetDemoMode();
-	if (!Mode || Mode->IsBattleOver())
-	{
-		return false;
-	}
-
-	const FHexBattleState* BS = Mode->GetBattleState();
-	if (!BS || BS->FixedCards.Num() == 0)
-	{
-		return false;
-	}
-
-	float MouseX = 0.0f;
-	float MouseY = 0.0f;
-	if (!GetMousePosition(MouseX, MouseY))
-	{
-		return false;
-	}
-
-	int32 SizeX = 0;
-	int32 SizeY = 0;
-	GetViewportSize(SizeX, SizeY);
-	const FVector2D Viewport(SizeX, SizeY);
-
-	for (int32 I = 0; I < BS->FixedCards.Num(); ++I)
-	{
-		FVector2D Pos, Size;
-		// 与 HUD 共用同一套布局，杜绝"画的和点的对不上"
-		AHexDemoHUD::GetFixedCardRect(I, Viewport, Pos, Size);
-
-		if (MouseX >= Pos.X && MouseX <= Pos.X + Size.X
-			&& MouseY >= Pos.Y && MouseY <= Pos.Y + Size.Y)
-		{
-			Mode->SelectCard(BS->FixedCards[I].Uid);
-			return true;
-		}
-	}
-
-	return false;
 }
 
 void AHexDemoPlayerController::OnRightClick()

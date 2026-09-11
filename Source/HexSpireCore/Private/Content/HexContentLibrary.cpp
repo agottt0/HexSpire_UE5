@@ -345,10 +345,52 @@ namespace
 	}
 }
 
+namespace
+{
+	/**
+	 * 可变卡池。
+	 *
+	 * ⚠️ 改成非 const 是为了支持表现层的 DataTable 覆写（OverrideCard）。
+	 *    core 自己【绝不】调用覆写接口 —— 不配表时这里就等于
+	 *    BuildAllCards() 的结果，与改动前完全一致。
+	 *
+	 * ⚠️ 返回的是内部引用，所以覆写会让【已持有的 FHexCardData*
+	 *    指针失效】（TArray 追加时可能重分配）。
+	 *    这就是 OverrideCard 注释里要求"只在启动早期调用"的原因：
+	 *    战斗开始后各处都缓存着卡定义指针。
+	 */
+	TArray<FHexCardData>& MutableCards()
+	{
+		static TArray<FHexCardData> Cards = BuildAllCards();
+		return Cards;
+	}
+}
+
 const TArray<FHexCardData>& FHexContentLibrary::AllCards()
 {
-	static const TArray<FHexCardData> Cards = BuildAllCards();
-	return Cards;
+	return MutableCards();
+}
+
+bool FHexContentLibrary::OverrideCard(const FHexCardData& Card)
+{
+	TArray<FHexCardData>& Cards = MutableCards();
+
+	for (FHexCardData& C : Cards)
+	{
+		if (C.Id == Card.Id)
+		{
+			C = Card;
+			return true;
+		}
+	}
+
+	Cards.Add(Card);
+	return false;
+}
+
+void FHexContentLibrary::ResetCardOverrides()
+{
+	MutableCards() = BuildAllCards();
 }
 
 const FHexCardData* FHexContentLibrary::FindCard(FName Id)

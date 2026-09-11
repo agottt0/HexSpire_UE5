@@ -44,11 +44,9 @@ private:
 	/** Q/W/E：选择左侧的固定卡 */
 	void OnFixedCardKey(int32 Index);
 
-	/**
-	 * 若光标落在固定卡上则选中它。
-	 * @return 是否命中（命中时调用方应【停止】继续做棋盘判定）
-	 */
-	bool TrySelectFixedCardAtCursor();
+	// ⚠️ TrySelectFixedCardAtCursor 已删除。
+	//    卡牌命中测试交给 Slate（UHexCardWidget::NativeOnMouseButtonDown），
+	//    不再由这里手算矩形 —— 两套坐标必然分叉。
 
 	AHexDemoGameMode* GetDemoMode() const;
 };

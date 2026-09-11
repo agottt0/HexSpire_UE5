@@ -7,6 +7,8 @@ ExamplesContent/
 
 # Generated project files
 *.sln
+# .slnx 是 VS 新版的解决方案格式，与 .sln 同样由 UBT 生成，不该进版本库
+*.slnx
 *.suo
 *.opensdf
 *.sdf

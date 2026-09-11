@@ -4,6 +4,10 @@
 #include "View/HexDemoGameMode.h"
 #include "View/HexDemoPlayerController.h"
 #include "View/HexBoardVisual.h"
+#include "UI/HexHandPanelWidget.h"
+#include "HexSpire.h"
+
+#include "Blueprint/UserWidget.h"
 
 #include "Run/HexRunState.h"
 #include "Battle/HexBattleState.h"
@@ -143,12 +147,16 @@ void AHexDemoHUD::DrawHUD()
 
 	DrawTopBar(Mode);
 
+	// 手牌与固定卡是 UMG 控件，每帧只需同步内容（不参与 Canvas 绘制）。
+	// ⚠️ 放在 IsInBattle 判断【外面】：不在战斗时也要调用，
+	//    否则从战斗回到地图时卡牌会留在屏幕上。
+	//    RefreshFromGameMode 内部会在非战斗状态下折叠自己。
+	EnsureHandPanel(Mode);
+
 	if (Mode->IsInBattle())
 	{
 		DrawIntentLines(Mode);
 		DrawUnitOverlays(Mode);
-		DrawHandPanel(Mode);
-		DrawFixedCardPanel(Mode);
 		DrawDamagePreview(Mode);
 		if (bShowPiles)
 		{
@@ -331,202 +339,40 @@ void AHexDemoHUD::DrawMapPanel(AHexDemoGameMode* Mode)
 
 // ══════════════════════════════════════════════════════════ 手牌
 
-void AHexDemoHUD::DrawHandPanel(AHexDemoGameMode* Mode)
+void AHexDemoHUD::EnsureHandPanel(AHexDemoGameMode* Mode)
 {
-	const FHexBattleState* BS = Mode->GetBattleState();
-	FHexBattleFlow* Flow = Mode->GetBattleFlow();
-	if (!BS || !Flow)
+	// ⚠️ 控件在首次 DrawHUD 时创建而不是在构造函数里：
+	//    构造 HUD 时 PlayerController 还没准备好，
+	//    CreateWidget 需要一个有效的 OwningPlayer 才能正确接收输入。
+	if (!HandPanel)
 	{
-		return;
+		APlayerController* PC = GetOwningPlayerController();
+		if (!PC)
+		{
+			return;
+		}
+
+		// ⚠️ 走 ResolvePanelClass 而不是写死 StaticClass()：
+		//    否则 WB_HandPanel 蓝图【永远不会被使用】——
+		//    美术在里面调好的手牌排列（间距/锚点/固定卡位置）不生效，
+		//    而且没有任何报错，只是看起来"改了没反应"。
+		HandPanel = CreateWidget<UHexHandPanelWidget>(
+			PC, UHexHandPanelWidget::ResolvePanelClass());
+		if (!HandPanel)
+		{
+			UE_LOG(LogHexSpire, Error, TEXT("手牌控件创建失败"));
+			return;
+		}
+
+		// ZOrder 0：卡牌在最底层。
+		// ⚠️ HUD 的 Canvas 绘制【永远画在所有 UMG 之上】，
+		//    所以顶栏/图例/伤害预览不会被卡牌挡住，不需要调 ZOrder。
+		HandPanel->AddToViewport(0);
 	}
 
-	const FHexUnit* Hero = BS->GetHero();
-	const TArray<FHexCardInstance>& Hand = BS->Piles.GetHand();
-
-	const float CardW = 168.0f;
-	const float CardH = 128.0f;
-	const float Gap = 8.0f;
-	const float TotalW = Hand.Num() * CardW + FMath::Max(0, Hand.Num() - 1) * Gap;
-	const float StartX = (Canvas->SizeX - TotalW) * 0.5f;
-	const float Y = Canvas->SizeY - CardH - 16.0f;
-
-	for (int32 I = 0; I < Hand.Num(); ++I)
-	{
-		const FHexCardInstance& Inst = Hand[I];
-		const FHexCardData* Card = FHexContentLibrary::FindCard(Inst.CardId);
-		if (!Card)
-		{
-			continue;
-		}
-
-		const float X = StartX + I * (CardW + Gap);
-		const bool bSelected = (Mode->GetSelectedCardUid() == Inst.Uid);
-		const bool bPlayable = Flow->CanPlayCard(Inst.Uid);
-		const int32 Cost = Flow->GetCardCost(Inst.Uid);
-
-		// 卡背：按类型着色
-		FLinearColor Back(0.10f, 0.11f, 0.14f);
-		switch (Card->CardType)
-		{
-		case EHexCardType::Attack: Back = FLinearColor(0.22f, 0.08f, 0.08f); break;
-		case EHexCardType::Guard:  Back = FLinearColor(0.08f, 0.14f, 0.24f); break;
-		case EHexCardType::Move:   Back = FLinearColor(0.08f, 0.20f, 0.14f); break;
-		case EHexCardType::Skill:  Back = FLinearColor(0.20f, 0.16f, 0.06f); break;
-		case EHexCardType::Derived:Back = FLinearColor(0.18f, 0.10f, 0.22f); break;
-		default: break;
-		}
-
-		// ⚠️ 打不出的牌必须【明显】变暗 —— 否则玩家会反复点击无效的牌。
-		DrawPanel(X, Y, CardW, CardH, Back, bPlayable ? 0.95f : 0.45f);
-
-		DrawSolidBox(X, Y, CardW, CardH,
-			bSelected ? ColWarn : (bPlayable ? FLinearColor(0.45f, 0.48f, 0.52f)
-				: FLinearColor(0.22f, 0.22f, 0.24f)),
-			bSelected ? 3.0f : 1.0f);
-
-		// 序号（对应数字键）
-		DrawTextShadowed(FString::Printf(TEXT("%d"), I + 1),
-			X + 6.0f, Y + 4.0f, ColDim);
-
-		// 费用
-		DrawTextShadowed(FString::Printf(TEXT("%d"), Cost),
-			X + CardW - 20.0f, Y + 4.0f,
-			bPlayable ? ColEnergy : ColBad, 1.2f);
-
-		// 名字
-		DrawTextShadowed(Card->DisplayName, X + 24.0f, Y + 4.0f,
-			bPlayable ? ColText : ColDim, 1.05f);
-
-		// ⚠️ 描述必须显示【实算值】而非公式。
-		//    RenderDescription 会把 {dmg} 换成按当前 ATK/DEF 算出的数字 ——
-		//    §7.5 的系数化让卡面数值随成长变化，玩家需要看到当前的实际值。
-		const FString Desc = Card->RenderDescription(Hero);
-		{
-			// 简单折行
-			const int32 MaxChars = 15;
-			FString Rest = Desc;
-			float TY = Y + 30.0f;
-			while (!Rest.IsEmpty() && TY < Y + CardH - 16.0f)
-			{
-				const int32 Take = FMath::Min(MaxChars, Rest.Len());
-				DrawTextShadowed(Rest.Left(Take), X + 8.0f, TY,
-					bPlayable ? FLinearColor(0.82f, 0.84f, 0.86f) : ColDim, 0.9f);
-				Rest = Rest.RightChop(Take);
-				TY += 17.0f;
-			}
-		}
-
-		// 射程提示（武器覆写会改这个，玩家必须能看到）
-		DrawTextShadowed(FString::Printf(TEXT("射程 %d-%d"),
-			Card->TargetSpec.RangeMin, Card->TargetSpec.RangeMax),
-			X + 8.0f, Y + CardH - 16.0f, ColDim, 0.85f);
-	}
+	HandPanel->RefreshFromGameMode(Mode);
 }
 
-// ══════════════════════════════════════════════════════════ 固定卡（左侧）
-
-void AHexDemoHUD::GetFixedCardRect(
-	int32 Index, const FVector2D& ViewportSize,
-	FVector2D& OutPos, FVector2D& OutSize)
-{
-	// ⚠️ 尺寸比手牌小一圈（144×74 vs 168×128）。
-	//    固定卡是【常驻】的，永远占着屏幕；做得和手牌一样大会
-	//    抢走注意力，而玩家真正需要每回合重新评估的是手牌。
-	constexpr float CardW = 144.0f;
-	constexpr float CardH = 74.0f;
-	constexpr float Gap = 8.0f;
-	constexpr float MarginX = 14.0f;
-
-	OutSize = FVector2D(CardW, CardH);
-
-	// 竖排，整体在左侧垂直居中偏下 —— 避开顶栏(74px)与图例
-	const float TotalH = 3 * CardH + 2 * Gap;
-	const float StartY = FMath::Max(96.0f, ViewportSize.Y * 0.52f - TotalH * 0.5f);
-
-	OutPos = FVector2D(MarginX, StartY + Index * (CardH + Gap));
-}
-
-void AHexDemoHUD::DrawFixedCardPanel(AHexDemoGameMode* Mode)
-{
-	const FHexBattleState* BS = Mode->GetBattleState();
-	FHexBattleFlow* Flow = Mode->GetBattleFlow();
-	if (!BS || !Flow)
-	{
-		return;
-	}
-
-	const FHexUnit* Hero = BS->GetHero();
-	const TArray<FHexCardInstance>& Fixed = BS->FixedCards;
-	if (Fixed.Num() == 0)
-	{
-		return;
-	}
-
-	const FVector2D Viewport(Canvas->SizeX, Canvas->SizeY);
-
-	// 区域标题 —— 让玩家明白这几张与手牌规则不同
-	{
-		FVector2D P, S;
-		GetFixedCardRect(0, Viewport, P, S);
-		DrawTextShadowed(TEXT("固定卡 · 常驻"), P.X, P.Y - 22.0f, ColDim, 0.9f);
-	}
-
-	for (int32 I = 0; I < Fixed.Num(); ++I)
-	{
-		const FHexCardInstance& Inst = Fixed[I];
-		const FHexCardData* Card = FHexContentLibrary::FindCard(Inst.CardId);
-		if (!Card)
-		{
-			continue;
-		}
-
-		FVector2D Pos, Size;
-		GetFixedCardRect(I, Viewport, Pos, Size);
-
-		const bool bSelected = (Mode->GetSelectedCardUid() == Inst.Uid);
-		const bool bPlayable = Flow->CanPlayCard(Inst.Uid);
-		const int32 Cost = Flow->GetCardCost(Inst.Uid);
-
-		// 与手牌一致的类型配色，玩家不需要学两套语言
-		FLinearColor Back(0.10f, 0.11f, 0.14f);
-		switch (Card->CardType)
-		{
-		case EHexCardType::Attack: Back = FLinearColor(0.22f, 0.08f, 0.08f); break;
-		case EHexCardType::Guard:  Back = FLinearColor(0.08f, 0.14f, 0.24f); break;
-		case EHexCardType::Move:   Back = FLinearColor(0.08f, 0.20f, 0.14f); break;
-		default: break;
-		}
-
-		DrawPanel(Pos.X, Pos.Y, Size.X, Size.Y, Back, bPlayable ? 0.95f : 0.45f);
-		DrawSolidBox(Pos.X, Pos.Y, Size.X, Size.Y,
-			bSelected ? ColWarn : (bPlayable ? FLinearColor(0.45f, 0.48f, 0.52f)
-				: FLinearColor(0.22f, 0.22f, 0.24f)),
-			bSelected ? 3.0f : 1.0f);
-
-		// 快捷键：Q/W/E —— 与手牌的数字键分开，避免选错
-		const TCHAR* Keys[] = { TEXT("Q"), TEXT("W"), TEXT("E") };
-		if (I < 3)
-		{
-			DrawTextShadowed(Keys[I], Pos.X + 6.0f, Pos.Y + 4.0f, ColDim);
-		}
-
-		DrawTextShadowed(FString::Printf(TEXT("%d"), Cost),
-			Pos.X + Size.X - 20.0f, Pos.Y + 4.0f,
-			bPlayable ? ColEnergy : ColBad, 1.15f);
-
-		DrawTextShadowed(Card->DisplayName, Pos.X + 24.0f, Pos.Y + 4.0f,
-			bPlayable ? ColText : ColDim, 1.0f);
-
-		// 只显示一行摘要：常驻卡玩家早就背下来了，不需要完整描述
-		const FString Desc = Card->RenderDescription(Hero);
-		DrawTextShadowed(Desc.Left(13), Pos.X + 8.0f, Pos.Y + 28.0f,
-			bPlayable ? FLinearColor(0.82f, 0.84f, 0.86f) : ColDim, 0.85f);
-
-		DrawTextShadowed(FString::Printf(TEXT("射程 %d-%d"),
-			Card->TargetSpec.RangeMin, Card->TargetSpec.RangeMax),
-			Pos.X + 8.0f, Pos.Y + Size.Y - 18.0f, ColDim, 0.8f);
-	}
-}
 
 // ══════════════════════════════════════════════════════════ 单位浮层
 

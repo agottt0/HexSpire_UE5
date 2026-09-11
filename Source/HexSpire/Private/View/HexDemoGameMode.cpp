@@ -5,6 +5,7 @@
 #include "View/HexUnitVisual.h"
 #include "View/HexDemoPlayerController.h"
 #include "View/HexDemoHUD.h"
+#include "Data/HexCardTableLoader.h"
 
 #include "Run/HexRunState.h"
 #include "Battle/HexBattleState.h"
@@ -41,6 +42,16 @@ AHexDemoGameMode::~AHexDemoGameMode() = default;
 void AHexDemoGameMode::StartPlay()
 {
 	Super::StartPlay();
+
+	// ── 卡牌配表：必须在 StartNewRun【之前】应用
+	//
+	// ⚠️ 顺序不能反。StartNewRun 会构造起始卡组，那时会按卡定义
+	//    拷贝数值；配表若晚于它应用，本局的卡组仍是旧数值 ——
+	//    表面上"改表没生效"，重开一局才对，极容易误判成配表坏了。
+	//
+	// ⚠️ 表不存在是正常情况（还没开始配表），此时全部走代码内建。
+	//    见 FHexCardTableLoader 的说明。
+	FHexCardTableLoader::ApplyDefaultTable();
 
 	// ── 棋盘：优先复用关卡里已放置的那一个
 	//
@@ -89,6 +100,29 @@ void AHexDemoGameMode::StartPlay()
 			UE_LOG(LogHexSpire, Display,
 				TEXT("[自检] 自动进入房间 %d"), Choices[0].RoomId);
 			EnterRoom(Choices[0].RoomId);
+
+			// ── 顺带选中第一张手牌
+			//
+			// ⚠️ 这不是调试残留，是【选中表现的唯一自动化入口】。
+			//    选中表现现在是"卡牌上浮"（RenderTransform 位移），
+			//    而它需要 NativeTick 每帧插值才会动。
+			//    这条链路的失败模式全是静默的：
+			//      · TickFrequency 被改成 Never → 一动不动
+			//      · 外部又调了 SetRenderScale → 位移被覆盖，抖动
+			//      · 上浮方向写成 +Y → 卡片沉到屏幕外
+			//    三种情况都不报错，且截图未必抓得到 Slate 层。
+			//    自动选一张牌之后，手牌控件的自检就能把上浮的
+			//    实际位移量打进日志，命令行即可验证。
+			if (const FHexBattleState* BS = GetBattleState())
+			{
+				const TArray<FHexCardInstance>& Hand = BS->Piles.GetHand();
+				if (Hand.Num() > 0)
+				{
+					SelectCard(Hand[0].Uid);
+					UE_LOG(LogHexSpire, Display,
+						TEXT("[自检] 自动选中手牌 uid=%d"), Hand[0].Uid);
+				}
+			}
 		}
 		else
 		{

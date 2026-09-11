@@ -94,6 +94,32 @@ struct HEXSPIRECORE_API FHexContentLibrary
 	static const TArray<FHexCardData>& AllCards();
 
 	/**
+	 * 用外部数据（DataTable）覆写/追加一张卡。
+	 *
+	 * ⚠️ 这是【表现层配表】的唯一入口，core 自己永远不调用它 ——
+	 *    所以 headless 验证与批量模拟拿到的始终是代码内建的那套
+	 *    实测数值，不受配表状态影响。这是 core 只依赖
+	 *    Core/CoreUObject 的前提，也是验证体系能秒级重跑的前提。
+	 *
+	 * 语义：同 Id 则【整条替换】，新 Id 则追加。
+	 *   整条替换而非字段级合并，是因为 CSV 的空单元格会填成类型默认值，
+	 *   "没填"与"填了 0"在 DataTable 里无法区分 ——
+	 *   做字段级合并会让"把费用改成 0"被当成"没填"而静默失效。
+	 *
+	 * ⚠️ 只应在游戏启动早期（任何战斗开始之前）调用。
+	 *    战斗中途替换卡定义会让已在手的卡实例与定义脱节。
+	 *
+	 * @return true = 覆写了已有卡；false = 追加了新卡
+	 */
+	static bool OverrideCard(const FHexCardData& Card);
+
+	/**
+	 * 撤销全部覆写，回到纯代码内建状态。
+	 * 验证器用它保证每个用例从同一基线开始。
+	 */
+	static void ResetCardOverrides();
+
+	/**
 	 * 构造英雄的初始卡组。
 	 *
 	 * ⚠️ 用户决策 q18：起始卡组缩到 4–5 张普通卡（留 3–4 个空位）。

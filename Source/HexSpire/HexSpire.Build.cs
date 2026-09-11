@@ -28,6 +28,7 @@ public class HexSpire : ModuleRules
 			"SlateCore",
 			"HexSpireCore",
 
+
 			// 六边形地面在运行时程序化生成。
 			// ⚠️ 刻意【不做成 StaticMesh 资产】：
 			//    .uasset 是二进制，改一次尺寸就得开编辑器重导，
@@ -39,5 +40,24 @@ public class HexSpire : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 		});
+
+		// ══════════════════════════════════════════════════════════════
+		// 仅编辑器：把 C++ 的卡面布局【写进】控件蓝图资产
+		// ══════════════════════════════════════════════════════════════
+		// HexBuildCardWidget commandlet 用这几个模块把控件树生成到
+		// WB_Card / WB_HandPanel 里，之后美术就能在设计器里直接拖布局。
+		//
+		// ⚠️ 必须包在 bBuildEditor 里。UMGEditor 带
+		//    [SupportedTargetTypes(Editor, Program)]，在 Game/Shipping
+		//    目标下引用它会直接链接失败 —— 也就是说打包会炸，
+		//    而编辑器里一切正常，问题只在出包时才暴露。
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.AddRange(new string[]
+			{
+				"UnrealEd",   // UBaseWidgetBlueprint::WidgetTree、FKismetEditorUtilities
+				"UMGEditor",  // UWidgetBlueprint、FWidgetBlueprintOperationUtils
+			});
+		}
 	}
 }

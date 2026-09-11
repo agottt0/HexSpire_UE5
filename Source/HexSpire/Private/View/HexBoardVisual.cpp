@@ -57,7 +57,8 @@ namespace
 	constexpr float GapScale = 0.94f;
 
 	/** 引擎必有的基础材质，带 Color 向量参数 */
-	const TCHAR* BasicMatPath =
+	// ⚠️ static：见 HexUnitVisual.cpp 同名变量的说明（unity build 重定义）
+	static const TCHAR* BasicMatPath =
 		TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial");
 
 	/** 一组同色的几何数据 */
