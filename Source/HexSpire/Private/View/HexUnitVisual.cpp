@@ -51,23 +51,11 @@
 
 namespace
 {
-	/** 引擎自带的圆柱：默认 100×100×100，中心在原点 */
-	const TCHAR* CylinderPath = TEXT("/Engine/BasicShapes/Cylinder.Cylinder");
-	const TCHAR* CubePath = TEXT("/Engine/BasicShapes/Cube.Cube");
-
-	/**
-	 * 引擎自带的基础材质。
-	 * ⚠️ 用 BasicShapeMaterial 而不是自建材质 —— 它支持 Color 参数，
-	 *    可以做成动态材质实例改颜色，且【不需要创建任何 .uasset】。
-	 */
-	// ⚠️ static 是必须的，不是风格问题。
-	//    HexBoardVisual.cpp 里有同名的 BasicMatPath，两者都在匿名命名空间里，
-	//    但 const TCHAR* 在命名空间作用域仍是【外部链接】——
-	//    unity build 把这两个 .cpp 合进同一个编译单元时就会重定义报错。
-	//    加 static 给它内部链接，各自独立。
-	//    这个 bug 是潜伏的：只有当 unity 的分组恰好把两者放到一起才炸，
-	//    所以新增一个无关的 .cpp 都可能把它触发出来。
-	static const TCHAR* BasicMatPath = TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial");
+	// 引擎自带资产的路径统一在 HexUnitAppearance.h 的 HexEngineAssets 里，
+	// 不在这里重复定义 —— 见那边关于 unity build 重定义的说明。
+	//
+	// 用 BasicShapeMaterial 而不是自建材质：它支持 Color 参数，
+	// 可以做成动态材质实例改颜色，且【不需要创建任何 .uasset】。
 
 	/**
 	 * Mannequin 的原始身高（uu）。实测值，见 probe_template_assets.py。
@@ -126,9 +114,9 @@ AHexUnitVisual::AHexUnitVisual()
 	HealthBarMesh->SetupAttachment(Root);
 	HealthBarMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cylinder(CylinderPath);
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(CubePath);
-	static ConstructorHelpers::FObjectFinder<UMaterialInterface> BasicMat(BasicMatPath);
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cylinder(HexEngineAssets::Cylinder);
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(HexEngineAssets::Cube);
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> BasicMat(HexEngineAssets::BasicMaterial);
 
 	if (Cylinder.Succeeded())
 	{

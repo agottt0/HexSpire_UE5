@@ -32,6 +32,7 @@
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "UObject/ConstructorHelpers.h"
+#include "View/HexUnitAppearance.h"
 #include "Hex/HexGrid.h"
 #include "Hex/HexCoord.h"
 #include "Content/HexLayouts.h"
@@ -56,10 +57,7 @@ namespace
 	/** 格子之间留的缝隙比例 —— 没有缝隙时六边形边界看不清 */
 	constexpr float GapScale = 0.94f;
 
-	/** 引擎必有的基础材质，带 Color 向量参数 */
-	// ⚠️ static：见 HexUnitVisual.cpp 同名变量的说明（unity build 重定义）
-	static const TCHAR* BasicMatPath =
-		TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial");
+	// 基础材质路径见 HexUnitAppearance.h 的 HexEngineAssets::BasicMaterial
 
 	/** 一组同色的几何数据 */
 	struct FColorBatch
@@ -98,7 +96,7 @@ AHexBoardVisual::AHexBoardVisual()
 	HighlightMesh->bUseAsyncCooking = false;
 	HighlightMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
-	static ConstructorHelpers::FObjectFinder<UMaterialInterface> BasicMat(BasicMatPath);
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> BasicMat(HexEngineAssets::BasicMaterial);
 	if (BasicMat.Succeeded())
 	{
 		BaseMaterial = BasicMat.Object;

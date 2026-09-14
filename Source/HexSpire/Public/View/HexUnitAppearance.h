@@ -38,6 +38,37 @@
 class USkeletalMesh;
 class UAnimSequence;
 
+// ══════════════════════════════════════════════════════════════════
+// 引擎自带资产的路径 —— 表现层共用
+// ══════════════════════════════════════════════════════════════════
+// ⚠️ 为什么这几条路径必须放在头文件里，而不是各 .cpp 的匿名命名空间里：
+//
+//    UE 的 unity build 会把整个模块的 .cpp 【拼进同一个编译单元】
+//    （见 Intermediate/Build/.../Module.HexSpire.cpp）。
+//    拼接是文本级的 #include，所以两个 .cpp 里各自的
+//    `namespace { ... }` 会【合并成同一个匿名命名空间】——
+//    此时同名变量就是实打实的重定义：
+//        error C2374: BasicMatPath: 重定义；多次初始化
+//
+//    加 `static` 不能解决。static 给的是内部链接，而这里的冲突发生在
+//    【同一个编译单元内的同一个作用域】，属于名字重复声明，
+//    和链接性无关 —— 两个 static 同名变量照样报 C2374/C2086。
+//
+//    这类 bug 是潜伏的：unity 的分组随文件数量变化，
+//    新增一个无关的 .cpp 就可能把两个冲突文件分到一组从而引爆。
+//    因此正确修法是【只保留一处定义】，用 inline 放进共用头文件。
+
+namespace HexEngineAssets
+{
+	/** 带 Color 向量参数的基础材质，引擎必有 —— 可做成动态实例改颜色 */
+	inline const TCHAR* BasicMaterial =
+		TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial");
+
+	/** 基础形状：默认均为 100×100×100，中心在原点 */
+	inline const TCHAR* Cylinder = TEXT("/Engine/BasicShapes/Cylinder.Cylinder");
+	inline const TCHAR* Cube     = TEXT("/Engine/BasicShapes/Cube.Cube");
+}
+
 /** 单位的动画状态。刻意做得很小 —— 回合制只需要这几个。 */
 enum class EHexUnitAnim : uint8
 {
