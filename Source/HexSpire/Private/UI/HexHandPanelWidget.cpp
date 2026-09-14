@@ -4,27 +4,45 @@
 #include "UI/HexCardWidget.h"
 #include "UI/HexCardWidgetWide.h"
 #include "UI/HexCardArt.h"
+#include "UI/HexCardLayout.h"
+#include "UI/HexTopBarLayout.h"
 #include "View/HexDemoGameMode.h"
 
 #include "Battle/HexBattleState.h"
 #include "Battle/HexBattleFlow.h"
+#include "Battle/HexRuleBook.h"
 #include "Battle/HexUnit.h"
 #include "Content/HexContentLibrary.h"
+#include "Core/HexSpireConstants.h"
 #include "Deck/HexPileManager.h"
+#include "Run/HexRunState.h"
+#include "Runes/HexRuneData.h"
 #include "HexSpire.h"
 
 #include "Blueprint/WidgetTree.h"
+#include "Components/Border.h"
+#include "Components/BorderSlot.h"
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Components/HorizontalBox.h"
 #include "Components/HorizontalBoxSlot.h"
+#include "Components/Image.h"
+#include "Components/Overlay.h"
+#include "Components/OverlaySlot.h"
+#include "Components/ProgressBar.h"
+#include "Components/ScaleBox.h"
+#include "Components/ScaleBoxSlot.h"
+#include "Components/SizeBox.h"
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
 #include "Engine/Engine.h"
 #include "Engine/Font.h"
+#include "Engine/Texture2D.h"
 #include "Styling/CoreStyle.h"
 #include "Kismet/GameplayStatics.h"
+
+namespace TB = HexTopBarLayout;
 
 
 namespace
@@ -100,9 +118,181 @@ TSharedRef<SWidget> UHexHandPanelWidget::RebuildWidget()
 		LeftCol->AddChild(FixedBox);
 	}
 
+	// ── 顶栏（左上角头像/字样 + 局内读数）
+	BuildTopBarDefaultTree(RootCanvas);
+
 	WidgetTree->RootWidget = RootCanvas;
 
 	return Super::RebuildWidget();
+}
+
+// ══════════════════════════════════════════════════════════ 顶栏默认树
+
+void UHexHandPanelWidget::BuildTopBarDefaultTree(UCanvasPanel* Canvas)
+{
+	if (!Canvas)
+	{
+		return;
+	}
+
+	// 与 commandlet 生成的蓝图结构【必须一致】，否则"没建蓝图"和
+	// "建了蓝图"两条路径的顶栏长得不一样，而这不会报错。
+	// 数值全部读 HexTopBarLayout，不在这里写字面量。
+
+	UBorder* Bar = WidgetTree->ConstructWidget<UBorder>(
+		UBorder::StaticClass(), FName(TB::N::TopBar));
+	Bar->SetBrushColor(TB::ColBarBg);
+	Bar->SetPadding(TB::BarPad);
+	Canvas->AddChild(Bar);
+	if (UCanvasPanelSlot* S = Cast<UCanvasPanelSlot>(Bar->Slot))
+	{
+		// 锚顶边左右拉伸：分辨率变化时顶栏始终贴满上沿
+		S->SetAnchors(FAnchors(0.0f, 0.0f, 1.0f, 0.0f));
+		S->SetOffsets(FMargin(0.0f, 0.0f, 0.0f, TB::BarHeight));
+		S->SetAlignment(FVector2D(0.0f, 0.0f));
+	}
+	TopBar = Bar;
+
+	UHorizontalBox* Row = WidgetTree->ConstructWidget<UHorizontalBox>(
+		UHorizontalBox::StaticClass(), FName(TB::N::TopRow));
+	Bar->AddChild(Row);
+
+	// ── 字样（竖条，在头像【左边】）
+	{
+		UScaleBox* ArtBox = WidgetTree->ConstructWidget<UScaleBox>(
+			UScaleBox::StaticClass(), FName(TB::N::NameArtBox));
+		// ⚠️ ScaleToFit 而不是写死尺寸：四个角色的字样比例是
+		//    0.36 / 0.41 / 0.52 / 0.34，写死宽高会让其中三个拉伸变形。
+		ArtBox->SetStretch(EStretch::ScaleToFit);
+		Row->AddChild(ArtBox);
+		if (UHorizontalBoxSlot* S = Cast<UHorizontalBoxSlot>(ArtBox->Slot))
+		{
+			S->SetVerticalAlignment(VAlign_Fill);
+			S->SetPadding(TB::NameArtPad);
+		}
+
+		// ⚠️ ScaleBox 只接【一个】子控件。四张字样要各自能被
+		//    BindWidgetOptional 找到，所以中间垫一层 Overlay
+		//    （Collapsed 的那三张不参与布局，不会挤偏可见那张）。
+		UOverlay* Stack = WidgetTree->ConstructWidget<UOverlay>(
+			UOverlay::StaticClass(), TEXT("NameArtStack"));
+		ArtBox->AddChild(Stack);
+
+		auto MakeNameArt = [&](const TCHAR* WidgetName) -> UImage*
+		{
+			UImage* Img = WidgetTree->ConstructWidget<UImage>(
+				UImage::StaticClass(), FName(WidgetName));
+			Stack->AddChild(Img);
+			HexCardLayout::SetOverlaySlot(Img, HAlign_Center, VAlign_Center);
+			Img->SetVisibility(ESlateVisibility::Collapsed);
+			return Img;
+		};
+
+		NameArt_Warden    = MakeNameArt(TB::N::NameArtWarden);
+		NameArt_Medium    = MakeNameArt(TB::N::NameArtMedium);
+		NameArt_Scrivener = MakeNameArt(TB::N::NameArtScrivener);
+		NameArt_Revenant  = MakeNameArt(TB::N::NameArtRevenant);
+	}
+
+	// ── 头像
+	{
+		USizeBox* Box = WidgetTree->ConstructWidget<USizeBox>(
+			USizeBox::StaticClass(), TEXT("PortraitBox"));
+		// ⚠️ 用 Min/MaxDesiredWidth 而不是 WidthOverride：
+		//    WidthOverride 的 bOverride_ 那一位【存不进资产】
+		//    （实测记录见 HexCardLayout.h），蓝图路径下尺寸会失控。
+		//    这里虽然是 C++ 路径，但两条路径要一致，写法保持同一套。
+		Box->SetMinDesiredWidth(TB::PortraitSize);
+		Box->SetMaxDesiredWidth(TB::PortraitSize);
+		Box->SetMinDesiredHeight(TB::PortraitSize);
+		Box->SetMaxDesiredHeight(TB::PortraitSize);
+		Row->AddChild(Box);
+		if (UHorizontalBoxSlot* S = Cast<UHorizontalBoxSlot>(Box->Slot))
+		{
+			S->SetVerticalAlignment(VAlign_Center);
+			S->SetPadding(TB::PortraitPad);
+		}
+
+		Portrait = WidgetTree->ConstructWidget<UImage>(
+			UImage::StaticClass(), FName(TB::N::Portrait));
+		Box->AddChild(Portrait);
+	}
+
+	// ── 读数列
+	{
+		UVerticalBox* Col = WidgetTree->ConstructWidget<UVerticalBox>(
+			UVerticalBox::StaticClass(), FName(TB::N::StatCol));
+		Row->AddChild(Col);
+		if (UHorizontalBoxSlot* S = Cast<UHorizontalBoxSlot>(Col->Slot))
+		{
+			S->SetVerticalAlignment(VAlign_Center);
+		}
+
+		auto MakeText = [&](const TCHAR* WidgetName, int32 FontSize,
+			const FLinearColor& Color) -> UTextBlock*
+		{
+			UTextBlock* T = WidgetTree->ConstructWidget<UTextBlock>(
+				UTextBlock::StaticClass(), FName(WidgetName));
+			T->SetFont(HexCardLayout::GetCardFont(FontSize));
+			T->SetColorAndOpacity(FSlateColor(Color));
+			Col->AddChild(T);
+			if (UVerticalBoxSlot* S = Cast<UVerticalBoxSlot>(T->Slot))
+			{
+				S->SetPadding(TB::RowPad);
+			}
+			return T;
+		};
+
+		HeroHP = MakeText(TB::N::HeroHP, TB::FontHP, TB::ColGood);
+
+		// ⚠️ 血条尺寸要靠外层 SizeBox 定，不能像 UImage 那样调
+		//    SetDesiredSizeOverride —— UProgressBar 没有那个函数
+		//    （它不是 UImage 的子类，笔刷尺寸不可直接覆写）。
+		//    不套 SizeBox 的话血条会被 VerticalBox 拉成整列宽、高度塌成 0。
+		USizeBox* BarBox = WidgetTree->ConstructWidget<USizeBox>(
+			USizeBox::StaticClass(), TEXT("HPBarBox"));
+		// 同前：用 Min/Max 而不是 WidthOverride（后者存不进资产）
+		BarBox->SetMinDesiredWidth(TB::HPBarWidth);
+		BarBox->SetMaxDesiredWidth(TB::HPBarWidth);
+		BarBox->SetMinDesiredHeight(TB::HPBarHeight);
+		BarBox->SetMaxDesiredHeight(TB::HPBarHeight);
+		Col->AddChild(BarBox);
+		if (UVerticalBoxSlot* S = Cast<UVerticalBoxSlot>(BarBox->Slot))
+		{
+			S->SetPadding(TB::RowPad);
+			S->SetHorizontalAlignment(HAlign_Left);
+		}
+
+		HPBar = WidgetTree->ConstructWidget<UProgressBar>(
+			UProgressBar::StaticClass(), FName(TB::N::HPBar));
+		HPBar->SetFillColorAndOpacity(TB::ColHPFill);
+		BarBox->AddChild(HPBar);
+
+		Corruption       = MakeText(TB::N::Corruption, TB::FontStat, TB::ColWarn);
+		CorruptionEffect = MakeText(TEXT("CorruptionEffect"), TB::FontSmall, TB::ColDim);
+		FloorInfo        = MakeText(TEXT("FloorInfo"),        TB::FontSmall, TB::ColDim);
+		DeckInfo         = MakeText(TB::N::DeckInfo,   TB::FontStat,  TB::ColText);
+		RuneInfo         = MakeText(TB::N::RuneInfo,   TB::FontSmall, TB::ColDim);
+		RoundNum         = MakeText(TB::N::RoundNum,   TB::FontStat,  TB::ColText);
+		EnergyText       = MakeText(TB::N::EnergyText, TB::FontStat,  TB::ColEnergy);
+		PileInfo         = MakeText(TB::N::PileInfo,   TB::FontSmall, TB::ColDim);
+	}
+
+	// ── 状态提示（顶栏下方，不在顶栏容器内 —— 它要能压在棋盘上）
+	{
+		StatusText = WidgetTree->ConstructWidget<UTextBlock>(
+			UTextBlock::StaticClass(), FName(TB::N::StatusText));
+		StatusText->SetFont(HexCardLayout::GetCardFont(TB::FontStatus));
+		StatusText->SetColorAndOpacity(FSlateColor(TB::ColWarn));
+		Canvas->AddChild(StatusText);
+		if (UCanvasPanelSlot* S = Cast<UCanvasPanelSlot>(StatusText->Slot))
+		{
+			S->SetAnchors(FAnchors(0.0f, 0.0f, 0.0f, 0.0f));
+			S->SetAlignment(FVector2D(0.0f, 0.0f));
+			S->SetOffsets(TB::StatusPad);
+			S->SetAutoSize(true);
+		}
+	}
 }
 
 void UHexHandPanelWidget::NativePreConstruct()
@@ -116,6 +306,10 @@ void UHexHandPanelWidget::NativePreConstruct()
 	{
 		return;
 	}
+
+	// 顶栏在设计器里也要所见即所得：不摆头像/字样的话，
+	// 美术调位置时四张图全是 Collapsed，只能盲摆。
+	ApplyHeroArt();
 
 	if (!HandBox)
 	{
@@ -343,26 +537,469 @@ void UHexHandPanelWidget::HideExtra(TArray<UHexCardWidget*>& Pool, int32 UsedCou
 	}
 }
 
+// ══════════════════════════════════════════════════════════ 顶栏取值
+//
+// ⚠️ 每个函数都必须能在 Mode / RunState / BattleState 为空时返回合法值。
+//    属性绑定在【设计器预览】里也会被调用，而那时根本没有 GameMode ——
+//    不判空会让美术一打开控件蓝图就崩编辑器。
+
+AHexDemoGameMode* UHexHandPanelWidget::GetMode() const
+{
+	// ⚠️ 设计器里 GetWorld() 返回的是预览世界，没有我们的 GameMode，
+	//    Cast 会得到 nullptr —— 这是正常路径，不要在这里报错。
+	return Cast<AHexDemoGameMode>(UGameplayStatics::GetGameMode(GetWorld()));
+}
+
+FText UHexHandPanelWidget::GetHeroHPText() const
+{
+	if (AHexDemoGameMode* Mode = GetMode())
+	{
+		if (const FHexRunState* Run = Mode->GetRunState())
+		{
+			return FText::FromString(FString::Printf(
+				TEXT("镇妖者  HP %d/%d"), Run->HeroHP, Run->HeroHPMax));
+		}
+	}
+	// 设计器占位：空 TextBlock 高度为 0，会让美术以为这行不存在
+	return FText::FromString(TEXT("镇妖者  HP 80/80"));
+}
+
+float UHexHandPanelWidget::GetHeroHPPercent() const
+{
+	if (AHexDemoGameMode* Mode = GetMode())
+	{
+		if (const FHexRunState* Run = Mode->GetRunState())
+		{
+			return Run->HeroHPMax > 0
+				? static_cast<float>(Run->HeroHP) / Run->HeroHPMax : 0.0f;
+		}
+	}
+	return 1.0f;
+}
+
+FLinearColor UHexHandPanelWidget::GetHeroHPColor() const
+{
+	const float R = GetHeroHPPercent();
+	return R > 0.5f ? TB::ColGood : (R > 0.25f ? TB::ColWarn : TB::ColBad);
+}
+
+FSlateColor UHexHandPanelWidget::GetHeroHPSlateColor() const
+{
+	// 只是把 FLinearColor 包一层 —— 见头文件说明：
+	// TextBlock 的 ColorAndOpacity 委托要 FSlateColor，签名必须严格一致。
+	return FSlateColor(GetHeroHPColor());
+}
+
+FText UHexHandPanelWidget::GetCorruptionText() const
+{
+	if (AHexDemoGameMode* Mode = GetMode())
+	{
+		if (const FHexRunState* Run = Mode->GetRunState())
+		{
+			return FText::FromString(FString::Printf(
+				TEXT("腐蚀度 %d"), Run->Corruption));
+		}
+	}
+	return FText::FromString(TEXT("腐蚀度 0"));
+}
+
+FLinearColor UHexHandPanelWidget::GetCorruptionColor() const
+{
+	if (AHexDemoGameMode* Mode = GetMode())
+	{
+		if (const FHexRunState* Run = Mode->GetRunState())
+		{
+			return Run->Corruption >= 6 ? TB::ColBad : TB::ColWarn;
+		}
+	}
+	return TB::ColWarn;
+}
+
+FSlateColor UHexHandPanelWidget::GetCorruptionSlateColor() const
+{
+	return FSlateColor(GetCorruptionColor());
+}
+
+FText UHexHandPanelWidget::GetCorruptionEffectText() const
+{
+	// ⚠️ §13.2 硬需求 5：不能只显示"腐蚀度 5"这个裸数字 ——
+	//    玩家不知道它意味着什么。必须换算成可读的后果，
+	//    否则 D4 的"要不要多探一间"决策缺少判断依据。
+	int32 C = 0;
+	if (AHexDemoGameMode* Mode = GetMode())
+	{
+		if (const FHexRunState* Run = Mode->GetRunState())
+		{
+			C = Run->Corruption;
+		}
+	}
+
+	return FText::FromString(FString::Printf(
+		TEXT("敌人 HP +%.0f%%  ATK +%.0f%%  掉落品质↑"),
+		C * HexK::CorruptionEnemyHpStep * 100.0f,
+		C * HexK::CorruptionEnemyAtkStep * 100.0f));
+}
+
+FText UHexHandPanelWidget::GetFloorText() const
+{
+	if (AHexDemoGameMode* Mode = GetMode())
+	{
+		if (const FHexRunState* Run = Mode->GetRunState())
+		{
+			return FText::FromString(FString::Printf(
+				TEXT("第 %d 层 · 碎片 %d"), Run->FloorIndex, Run->Shards));
+		}
+	}
+	return FText::FromString(TEXT("第 1 层 · 碎片 0"));
+}
+
+FText UHexHandPanelWidget::GetDeckText() const
+{
+	if (AHexDemoGameMode* Mode = GetMode())
+	{
+		if (const FHexRunState* Run = Mode->GetRunState())
+		{
+			return FText::FromString(FString::Printf(
+				TEXT("卡组 %d/%d"), Run->GetUsedCapacity(), Run->DeckCapacity));
+		}
+	}
+	return FText::FromString(TEXT("卡组 0/12"));
+}
+
+FText UHexHandPanelWidget::GetRuneText() const
+{
+	if (AHexDemoGameMode* Mode = GetMode())
+	{
+		if (const FHexRunState* Run = Mode->GetRunState())
+		{
+			FString Runes;
+			for (int32 I = 0; I < FHexRuneLoadout::SlotCount; ++I)
+			{
+				const FHexRuneData* R = Run->RuneLoadout.GetSlot(I);
+				Runes += R
+					? FString::Printf(TEXT("[%s]"), *R->DisplayName)
+					: TEXT("[空]");
+			}
+			return FText::FromString(TEXT("符文 ") + Runes);
+		}
+	}
+	return FText::FromString(TEXT("符文 [空][空][空]"));
+}
+
+FText UHexHandPanelWidget::GetRoundText() const
+{
+	if (AHexDemoGameMode* Mode = GetMode())
+	{
+		if (Mode->IsInBattle())
+		{
+			if (const FHexBattleState* BS = Mode->GetBattleState())
+			{
+				return FText::FromString(FString::Printf(
+					TEXT("回合 %d"), BS->RoundNumber));
+			}
+		}
+		// 战斗外没有回合概念 —— 返回空，蓝图可绑显隐把这行收掉
+		return FText::GetEmpty();
+	}
+	return FText::FromString(TEXT("回合 1"));
+}
+
+FText UHexHandPanelWidget::GetEnergyText() const
+{
+	if (AHexDemoGameMode* Mode = GetMode())
+	{
+		if (Mode->IsInBattle())
+		{
+			if (const FHexBattleState* BS = Mode->GetBattleState())
+			{
+				const int32 Max = FHexRuleBook::EnergyMax(*BS);
+
+				// ⚠️ 用 ◆/◇ 而不是纯数字：体力是每回合都要数的量，
+				//    §13.2 要求关键资源可以"一眼扫到"而不是读数字。
+				FString Pips;
+				for (int32 I = 0; I < Max; ++I)
+				{
+					Pips += (I < BS->Energy) ? TEXT("◆") : TEXT("◇");
+				}
+				return FText::FromString(FString::Printf(
+					TEXT("体力 %s  %d/%d"), *Pips, BS->Energy, Max));
+			}
+		}
+		return FText::GetEmpty();
+	}
+	return FText::FromString(TEXT("体力 ◆◆◆◇◇  3/5"));
+}
+
+FText UHexHandPanelWidget::GetPileText() const
+{
+	if (AHexDemoGameMode* Mode = GetMode())
+	{
+		if (Mode->IsInBattle())
+		{
+			if (const FHexBattleState* BS = Mode->GetBattleState())
+			{
+				return FText::FromString(FString::Printf(
+					TEXT("抽 %d · 弃 %d · 消耗 %d"),
+					BS->Piles.NumDraw(), BS->Piles.NumDiscard(),
+					BS->Piles.NumExhaust()));
+			}
+		}
+		return FText::GetEmpty();
+	}
+	return FText::FromString(TEXT("抽 5 · 弃 0 · 消耗 0"));
+}
+
+FText UHexHandPanelWidget::GetStatusText() const
+{
+	if (AHexDemoGameMode* Mode = GetMode())
+	{
+		return FText::FromString(Mode->GetStatusMessage());
+	}
+	return FText::GetEmpty();
+}
+
+// ── 角色 UI 资产
+
+const TB::FHeroUIArt& UHexHandPanelWidget::ResolveHeroArt() const
+{
+	// 设计器里按 DesignPreviewHeroIndex 挑，运行时按 RunState 的 HeroId。
+	//
+	// ⚠️ 目前逻辑层只有 warden 一个英雄，所以运行时恒是 Warden。
+	//    四组资产都摆进蓝图、三组 Collapsed，以后加英雄时
+	//    在这里加 HeroId 分支即可，蓝图不用重做。
+	if (IsDesignTime())
+	{
+		const int32 I = FMath::Clamp(DesignPreviewHeroIndex, 0,
+			static_cast<int32>(UE_ARRAY_COUNT(TB::AllHeroes)) - 1);
+		return *TB::AllHeroes[I];
+	}
+
+	return TB::Default();
+}
+
+UTexture2D* UHexHandPanelWidget::GetPortraitTexture() const
+{
+	// ⚠️ LoadObject 失败是【静默】的（返回 nullptr → 控件不画图层）。
+	//    所以自检里要单独报告贴图有没有拿到，否则"头像是空白"
+	//    与"头像图层没画"在画面上完全一样。
+	return LoadObject<UTexture2D>(nullptr, ResolveHeroArt().PortraitPath);
+}
+
+UTexture2D* UHexHandPanelWidget::GetNameArtTexture() const
+{
+	return LoadObject<UTexture2D>(nullptr, ResolveHeroArt().NameArtPath);
+}
+
+void UHexHandPanelWidget::ApplyHeroArt()
+{
+	const TB::FHeroUIArt& Art = ResolveHeroArt();
+
+	if (Portrait)
+	{
+		if (UTexture2D* Tex = GetPortraitTexture())
+		{
+			Portrait->SetBrushFromTexture(Tex, false);
+			// 头像是近正方形（实测 617x611 等），按方形槽位画不会变形
+			Portrait->SetDesiredSizeOverride(
+				FVector2D(TB::PortraitSize, TB::PortraitSize));
+			Portrait->SetVisibility(ESlateVisibility::HitTestInvisible);
+		}
+		else
+		{
+			UE_LOG(LogHexSpire, Warning,
+				TEXT("头像贴图加载失败：%s"), Art.PortraitPath);
+			Portrait->SetVisibility(ESlateVisibility::Collapsed);
+		}
+	}
+
+	// ── 四张字样：只留当前角色那张可见
+	//
+	// ⚠️ 用 Collapsed 而不是 Hidden。Hidden 仍然【占位】，
+	//    三张隐藏的字样会把可见那张挤偏（而且挤的量取决于
+	//    哪张最宽，换角色时位置还会跳）。
+	struct FPair { UImage* Img; const TCHAR* Name; };
+	const FPair Pairs[] = {
+		{ NameArt_Warden,    TB::N::NameArtWarden    },
+		{ NameArt_Medium,    TB::N::NameArtMedium    },
+		{ NameArt_Scrivener, TB::N::NameArtScrivener },
+		{ NameArt_Revenant,  TB::N::NameArtRevenant  },
+	};
+
+	for (const FPair& P : Pairs)
+	{
+		if (!P.Img)
+		{
+			continue;
+		}
+
+		const bool bActive = (FCString::Strcmp(P.Name, Art.NameArtWidget) == 0);
+
+		if (bActive)
+		{
+			if (UTexture2D* Tex = LoadObject<UTexture2D>(nullptr, Art.NameArtPath))
+			{
+				// ⚠️ 这里【不设】DesiredSizeOverride：外层 ScaleBox 按
+				//    原图比例缩放，写死尺寸会把 0.34~0.52 的比例差异
+				//    压成同一个形状，字样就变形了。
+				P.Img->SetBrushFromTexture(Tex, false);
+				P.Img->SetVisibility(ESlateVisibility::HitTestInvisible);
+			}
+			else
+			{
+				UE_LOG(LogHexSpire, Warning,
+					TEXT("字样贴图加载失败：%s"), Art.NameArtPath);
+				P.Img->SetVisibility(ESlateVisibility::Collapsed);
+			}
+		}
+		else
+		{
+			P.Img->SetVisibility(ESlateVisibility::Collapsed);
+		}
+	}
+}
+
+void UHexHandPanelWidget::RefreshTopBar(AHexDemoGameMode* Mode)
+{
+	if (!bCppDrivesTopBar)
+	{
+		// 蓝图接管：C++ 一个字都不写，否则蓝图里设的值会被每帧覆盖。
+		// 但角色资产仍要跟着 HeroId 走 —— 那是数据而非外观。
+		ApplyHeroArt();
+		return;
+	}
+
+	ApplyHeroArt();
+
+	if (HeroHP)
+	{
+		HeroHP->SetText(GetHeroHPText());
+		HeroHP->SetColorAndOpacity(FSlateColor(GetHeroHPColor()));
+	}
+	if (HPBar)
+	{
+		HPBar->SetPercent(GetHeroHPPercent());
+		HPBar->SetFillColorAndOpacity(GetHeroHPColor());
+	}
+	if (Corruption)
+	{
+		Corruption->SetText(GetCorruptionText());
+		Corruption->SetColorAndOpacity(FSlateColor(GetCorruptionColor()));
+	}
+	if (CorruptionEffect)
+	{
+		CorruptionEffect->SetText(GetCorruptionEffectText());
+	}
+	if (FloorInfo)
+	{
+		FloorInfo->SetText(GetFloorText());
+	}
+	if (DeckInfo)
+	{
+		DeckInfo->SetText(GetDeckText());
+	}
+	if (RuneInfo)
+	{
+		RuneInfo->SetText(GetRuneText());
+	}
+
+	// ── 战斗专属的三行：战斗外收掉而不是留空行
+	const bool bInBattle = Mode && Mode->IsInBattle();
+
+	auto SetBattleRow = [bInBattle](UTextBlock* T, const FText& Txt)
+	{
+		if (!T)
+		{
+			return;
+		}
+		T->SetText(Txt);
+		T->SetVisibility(bInBattle
+			? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+	};
+
+	SetBattleRow(RoundNum,   GetRoundText());
+	SetBattleRow(EnergyText, GetEnergyText());
+	SetBattleRow(PileInfo,   GetPileText());
+
+	if (StatusText)
+	{
+		const FText Msg = GetStatusText();
+		StatusText->SetText(Msg);
+		// 空消息时收掉，免得留一块空白抢视觉
+		StatusText->SetVisibility(Msg.IsEmpty()
+			? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
+	}
+}
+
 void UHexHandPanelWidget::RefreshFromGameMode(AHexDemoGameMode* Mode)
 {
-	// ⚠️ HandBox / FixedBox 只要求【至少有一个】存在。
-	//    以前这里是 && 全都要有，改成 WBP 可绑定后那会让"只摆了手牌区、
-	//    没摆固定卡区"的 WBP 整块界面不刷新 —— 一张卡都不显示。
-	if (!Mode || (!HandBox && !FixedBox))
+	if (!Mode)
 	{
 		return;
 	}
 
 	const FHexBattleState* BS = Mode->GetBattleState();
 	FHexBattleFlow* Flow = Mode->GetBattleFlow();
+	const bool bBattle = (BS && Flow && Mode->IsInBattle());
 
-	// 不在战斗中：整块隐藏（地图界面仍由 HUD 用 Canvas 画）
-	if (!BS || !Flow || !Mode->IsInBattle())
+	// ══════════════════════════════════════════════════════════════
+	// 顶栏先刷，而且【无条件】刷
+	// ══════════════════════════════════════════════════════════════
+	// ⚠️ 必须在下面的折叠逻辑【之前】，而且不能跟着战斗状态走。
+	//    顶栏在地图界面也要显示（HP、腐蚀度、卡组、层数都是跨战斗的
+	//    信息，那正是玩家在地图上做"再探一间还是收手"决策的依据）。
+	//
+	// ⚠️ 这里曾经是 SetVisibility(Collapsed) 把【整个控件】折叠掉，
+	//    那是顶栏还在 Canvas 上时的写法。现在顶栏搬进来了，
+	//    照抄那套会让顶栏一出战斗就整块消失 —— 而且不报错。
+	SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+	RefreshTopBar(Mode);
+
+	if (TopBar)
 	{
-		SetVisibility(ESlateVisibility::Collapsed);
+		TopBar->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+	}
+
+	// ⚠️ 顶栏自检必须在这里、而且【与战斗状态无关】。
+	//    下面那个 LogSelfCheckOnce 在"非战斗直接 return"的后面，
+	//    所以它只在战斗中跑得到 —— 而"顶栏在地图界面消失"恰恰是
+	//    本次改动最可能的回归（顶栏原先跟着整块控件一起折叠）。
+	//    只在战斗中自检的话，这个回归永远测不出来。
+	LogTopBarCheckOnce(bBattle);
+
+	// ⚠️ HandBox / FixedBox 只要求【至少有一个】存在。
+	//    以前这里是 && 全都要有，改成 WBP 可绑定后那会让"只摆了手牌区、
+	//    没摆固定卡区"的 WBP 整块界面不刷新 —— 一张卡都不显示。
+	if (!HandBox && !FixedBox)
+	{
 		return;
 	}
-	SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+
+	// 不在战斗中：只收掉【卡牌容器】，顶栏留着
+	if (!bBattle)
+	{
+		if (HandBox)
+		{
+			HandBox->SetVisibility(ESlateVisibility::Collapsed);
+		}
+		if (FixedBox)
+		{
+			FixedBox->SetVisibility(ESlateVisibility::Collapsed);
+		}
+		if (FixedTitle)
+		{
+			FixedTitle->SetVisibility(ESlateVisibility::Collapsed);
+		}
+		return;
+	}
+
+	if (HandBox)
+	{
+		HandBox->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+	}
+	if (FixedBox)
+	{
+		FixedBox->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+	}
 
 	const FHexUnit* Hero = BS->GetHero();
 	const int32 SelectedUid = Mode->GetSelectedCardUid();
@@ -491,6 +1128,39 @@ void UHexHandPanelWidget::RefreshFromGameMode(AHexDemoGameMode* Mode)
 	}
 
 	LogSelfCheckOnce();
+}
+
+TArray<FString> UHexHandPanelWidget::GetUnboundTopBarNames() const
+{
+	// ⚠️ 逐个列出而不是只数个数：知道"少了 3 个"没用，
+	//    要知道少的是哪几个才能去蓝图里改名字。
+	TArray<FString> Missing;
+
+	auto Check = [&Missing](const UWidget* W, const TCHAR* Name)
+	{
+		if (!W)
+		{
+			Missing.Add(Name);
+		}
+	};
+
+	Check(TopBar,            TB::N::TopBar);
+	Check(Portrait,          TB::N::Portrait);
+	Check(NameArt_Warden,    TB::N::NameArtWarden);
+	Check(NameArt_Medium,    TB::N::NameArtMedium);
+	Check(NameArt_Scrivener, TB::N::NameArtScrivener);
+	Check(NameArt_Revenant,  TB::N::NameArtRevenant);
+	Check(HeroHP,            TB::N::HeroHP);
+	Check(HPBar,             TB::N::HPBar);
+	Check(Corruption,        TB::N::Corruption);
+	Check(DeckInfo,          TB::N::DeckInfo);
+	Check(RuneInfo,          TB::N::RuneInfo);
+	Check(RoundNum,          TB::N::RoundNum);
+	Check(EnergyText,        TB::N::EnergyText);
+	Check(PileInfo,          TB::N::PileInfo);
+	Check(StatusText,        TB::N::StatusText);
+
+	return Missing;
 }
 
 void UHexHandPanelWidget::LogSelfCheckOnce()
@@ -712,5 +1382,124 @@ void UHexHandPanelWidget::LogSelfCheckOnce()
 			*HexCardArt::GetTypeName(V.CardType),
 			Tint.Equals(FLinearColor::White) ? TEXT("无（按原图）") : TEXT("有"),
 			*V.Description);
+	}
+
+}
+
+void UHexHandPanelWidget::LogTopBarCheckOnce(bool bInBattle)
+{
+	// ⚠️ 与卡面自检分开，而且【不要求在战斗中】—— 顶栏在地图界面也在，
+	//    只在战斗里自检会漏掉“顶栏一出战斗就消失”这个回归。
+	if (bTopBarCheckLogged)
+	{
+		return;
+	}
+
+	// ⚠️ 必须等布局完成。GetCachedGeometry 在首次布局前返回全零，
+	//    第一帧就查会得到“尺寸为 0”的假警报，而假警报会训练人
+	//    忽略这条日志，比没有日志更糟。
+	if (++TopBarRefreshCount < 3)
+	{
+		return;
+	}
+	bTopBarCheckLogged = true;
+
+	UE_LOG(LogHexSpire, Display,
+		TEXT("[自检] 顶栏自检（当前%s战斗中）"),
+		bInBattle ? TEXT("在") : TEXT("不在"));
+
+	// ══════════════════════════════════════════════════════════════
+	// 顶栏自检
+	// ══════════════════════════════════════════════════════════════
+	// ⚠️ 顶栏刚从 Canvas 搬到 UMG，失败模式全是静默的：
+	//      · 贴图路径错（资产名有 Revanat/Revenat 拼写不一致）→ 不画图层
+	//      · 控件名对不上 BindWidgetOptional → 那一项永远空
+	//      · 顶栏尺寸为 0（漏了锚点或 RootWidget）→ 什么都不显示
+	//    三种都不报错，而截图也验证不了（-dumpmovie 不含 Slate 层）。
+	const TArray<FString> Unbound = GetUnboundTopBarNames();
+	if (Unbound.Num() == 0)
+	{
+		UE_LOG(LogHexSpire, Display,
+			TEXT("[自检] 顶栏控件全部绑定成功"));
+	}
+	else
+	{
+		// 不是 Error：美术故意删掉某一项（比如不要符文行）是合法的。
+		// 但必须显眼 —— "我改了蓝图但那一项不显示"就是这个原因。
+		UE_LOG(LogHexSpire, Warning,
+			TEXT("[自检] 顶栏有 %d 项未绑定：%s。"
+				 "若非有意省略，请检查控件蓝图里的控件名是否与 C++ 属性同名"),
+			Unbound.Num(), *FString::Join(Unbound, TEXT(", ")));
+	}
+
+	// ── 贴图是否真的加载到（"头像是空白"与"图层没画"在画面上一样）
+	const TB::FHeroUIArt& Art = ResolveHeroArt();
+	UTexture2D* PortraitTex = GetPortraitTexture();
+	UTexture2D* NameArtTex  = GetNameArtTexture();
+
+	UE_LOG(LogHexSpire, Display,
+		TEXT("[自检] 顶栏贴图：头像=%s 字样=%s"),
+		PortraitTex ? TEXT("有") : TEXT("【缺】"),
+		NameArtTex  ? TEXT("有") : TEXT("【缺】"));
+
+	if (!PortraitTex)
+	{
+		UE_LOG(LogHexSpire, Error,
+			TEXT("[自检] 头像贴图加载失败：%s —— 检查资产名"
+				 "（注意 Revenant 的头像叫 UI_Revanat_头像）"),
+			Art.PortraitPath);
+	}
+	if (!NameArtTex)
+	{
+		UE_LOG(LogHexSpire, Error,
+			TEXT("[自检] 字样贴图加载失败：%s —— 检查资产名"
+				 "（注意字样叫 UI_Revenat_字样，与头像拼写不同）"),
+			Art.NameArtPath);
+	}
+	else
+	{
+		// 报告实际比例，确认 ScaleBox 有没有把它压变形
+		UE_LOG(LogHexSpire, Display,
+			TEXT("[自检]   字样原始尺寸 %dx%d（比例 %.3f）—— "
+				 "ScaleBox 应按此比例缩放，不应被压成方形"),
+			NameArtTex->GetSizeX(), NameArtTex->GetSizeY(),
+			NameArtTex->GetSizeY() > 0
+				? static_cast<float>(NameArtTex->GetSizeX())
+					/ NameArtTex->GetSizeY() : 0.0f);
+	}
+
+	// ── 顶栏是否真的画出来了
+	//
+	// ⚠️ 必须查渲染尺寸而不只是控件是否存在：控件对象全在、
+	//    贴图全加载成功、绑定全通过 —— 但漏了锚点或 RootWidget 时
+	//    Slate 表示是 SNullWidget，屏幕上什么都没有。
+	if (TopBar)
+	{
+		const FVector2D Size = TopBar->GetCachedGeometry().GetLocalSize();
+		if (Size.IsNearlyZero())
+		{
+			UE_LOG(LogHexSpire, Error,
+				TEXT("[自检] 顶栏渲染尺寸为 0 —— 控件建了但没画出来。"
+					 "检查 TopBar 的 CanvasPanelSlot 锚点与 RootWidget 赋值"));
+		}
+		else
+		{
+			UE_LOG(LogHexSpire, Display,
+				TEXT("[自检]   顶栏渲染尺寸 %.0fx%.0f（高度常量 %.0f）"),
+				Size.X, Size.Y, TB::BarHeight);
+		}
+	}
+
+	// ── 状态提示是否还有显示点
+	//
+	// ⚠️ 这条专门防一类回归：GetStatusMessage() 原先【唯一】的
+	//    绘制点在已删除的 DrawTopBar 里。StatusText 没绑上的话，
+	//    全部操作反馈（阵亡/胜利/体力不足/目标不合法）会无声消失。
+	if (!StatusText)
+	{
+		UE_LOG(LogHexSpire, Warning,
+			TEXT("[自检] StatusText 未绑定 —— 状态提示将【完全不显示】。"
+				 "它是 GetStatusMessage() 唯一的显示点"
+				 "（原先画在已删除的 DrawTopBar 里）"));
 	}
 }

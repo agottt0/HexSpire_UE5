@@ -29,6 +29,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Components/OverlaySlot.h"
+#include "Layout/Margin.h"
+// ⚠️ 必须是完整定义而非前置声明：SetOverlaySlot 里访问了 W->Slot，
+//    前置声明的 class UWidget; 只能用于声明指针，取成员会报
+//    error C2027: 使用了未定义类型"UWidget"。
+#include "Components/Widget.h"
 
 namespace HexCardLayout
 {
@@ -205,4 +211,33 @@ namespace HexCardLayout
 	 *    反而比可用的白卡更抢眼，与"别点这张"的意图正好相反。
 	 */
 	inline const FLinearColor ColDimVeil = FLinearColor(0.86f, 0.87f, 0.88f, 0.55f);
+
+	// ══════════════════════════════════════════════════════════════
+	// 槽位辅助 —— 运行时与 commandlet 两条路径共用
+	// ══════════════════════════════════════════════════════════════
+	// ⚠️ 为什么必须放在头文件里，而不是各 .cpp 的匿名命名空间里：
+	//
+	//    UE 的 unity build 把整个模块的 .cpp 【拼进同一个编译单元】
+	//    （见 Intermediate/Build/.../Module.HexSpire.cpp）。
+	//    拼接是文本级 #include，于是各 .cpp 里的 `namespace { ... }`
+	//    会【合并成同一个匿名命名空间】，同名函数就成了重定义：
+	//        error C2084: 函数已有主体
+	//        error C2572: 重定义默认参数
+	//    带默认参数的函数尤其明显 —— 默认参数在同一作用域只能声明一次。
+	//
+	//    这个 bug 是潜伏的：unity 分组随文件数量变化，
+	//    新增一个无关的 .cpp 就可能把两个冲突文件分到一组从而引爆。
+	//    正确修法是只保留一处定义，用 inline 放进共用头文件。
+
+	/** 给 Overlay 的子项设置对齐与边距 */
+	inline void SetOverlaySlot(UWidget* W, EHorizontalAlignment H,
+		EVerticalAlignment V, const FMargin& Pad = FMargin(0.0f))
+	{
+		if (UOverlaySlot* S = Cast<UOverlaySlot>(W->Slot))
+		{
+			S->SetHorizontalAlignment(H);
+			S->SetVerticalAlignment(V);
+			S->SetPadding(Pad);
+		}
+	}
 }

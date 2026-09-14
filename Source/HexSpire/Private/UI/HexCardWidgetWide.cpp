@@ -19,20 +19,6 @@
 
 namespace L = HexCardLayout;
 
-namespace
-{
-	void SetOverlayPad(UWidget* W, EHorizontalAlignment H, EVerticalAlignment V,
-		const FMargin& Pad = FMargin(0.0f))
-	{
-		if (UOverlaySlot* S = Cast<UOverlaySlot>(W->Slot))
-		{
-			S->SetHorizontalAlignment(H);
-			S->SetVerticalAlignment(V);
-			S->SetPadding(Pad);
-		}
-	}
-}
-
 UHexCardWidgetWide::UHexCardWidgetWide(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
@@ -85,7 +71,7 @@ void UHexCardWidgetWide::BuildDefaultTree()
 	// ── ① 卡框（横版贴图，铺满）
 	Frame = WidgetTree->ConstructWidget<UImage>(UImage::StaticClass(), L::N::Frame);
 	MainOverlay->AddChild(Frame);
-	SetOverlayPad(Frame, HAlign_Fill, VAlign_Fill);
+	L::SetOverlaySlot(Frame, HAlign_Fill, VAlign_Fill);
 
 	// ── ② 内容行：图标 | 文字 | 快捷键
 	{
@@ -94,7 +80,7 @@ void UHexCardWidgetWide::BuildDefaultTree()
 		MainOverlay->AddChild(Row);
 		// ⚠️ 内边距让内容落在贴图的【留白区】内。
 		//    这几个比例是对贴图做亮度采样量出来的，见 HexCardLayout::R。
-		SetOverlayPad(Row, HAlign_Fill, VAlign_Fill, L::R::ContentPad);
+		L::SetOverlaySlot(Row, HAlign_Fill, VAlign_Fill, L::R::ContentPad);
 
 		// 类型图标
 		TypeIcon = WidgetTree->ConstructWidget<UImage>(
@@ -152,7 +138,7 @@ void UHexCardWidgetWide::BuildDefaultTree()
 		CostBadge->SetPadding(L::R::CostInner);
 		CostBadge->SetBrushColor(L::ColCostBadge);
 		MainOverlay->AddChild(CostBadge);
-		SetOverlayPad(CostBadge, HAlign_Left, VAlign_Top, L::R::CostSlotPad);
+		L::SetOverlaySlot(CostBadge, HAlign_Left, VAlign_Top, L::R::CostSlotPad);
 
 		Cost = WidgetTree->ConstructWidget<UTextBlock>(
 			UTextBlock::StaticClass(), L::N::Cost);
@@ -166,7 +152,7 @@ void UHexCardWidgetWide::BuildDefaultTree()
 	Dim->SetBrushColor(L::ColDimVeil);
 	Dim->SetVisibility(ESlateVisibility::Hidden);
 	MainOverlay->AddChild(Dim);
-	SetOverlayPad(Dim, HAlign_Fill, VAlign_Fill);
+	L::SetOverlaySlot(Dim, HAlign_Fill, VAlign_Fill);
 
 	// ⚠️ 漏了这一行会让整棵树【建了但不显示】：
 	//    Super::RebuildWidget() 返回 WidgetTree->RootWidget 的 Slate 表示，

@@ -48,7 +48,9 @@ public:
 
 private:
 	// ── 分区绘制
-	void DrawTopBar(AHexDemoGameMode* Mode);
+	// ⚠️ DrawTopBar 已删除 —— 顶栏整块搬进了 UHexHandPanelWidget。
+	//    Canvas 绘制永远盖在 UMG 之上，顶栏留在这里的话
+	//    左上角的头像永远看不见（且不报错）。
 	void DrawMapPanel(AHexDemoGameMode* Mode);
 
 	/**

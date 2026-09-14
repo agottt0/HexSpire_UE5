@@ -364,3 +364,130 @@ x 的 17%~92%、y 的 17%~83%，四周是暗色边框。
 仍是**外部链接**，unity build 把两个 .cpp 合进同一编译单元时就重定义报错。
 加 `static` 修掉。这个 bug 一直潜伏着，我新增一个无关的 .cpp
 就把它触发了出来。
+
+---
+
+## 左上角头像/字样 + 顶栏（本次新增）
+
+打开 `Content/HexSpire/UI/WB_HandPanel`，顶栏已经在里面了，直接拖。
+
+结构（字样在头像**左边**，都在顶栏最左）：
+
+```
+PanelRoot (CanvasPanel)
+├─ TopBar (Border)              锚顶边左右拉伸，高 96px
+│  └─ TopRow (HorizontalBox)
+│     ├─ NameArtBox (ScaleBox)  ← 字样竖条
+│     │  └─ NameArtStack (Overlay)
+│     │     ├─ NameArt_Warden      (可见)
+│     │     ├─ NameArt_Medium      (Collapsed)
+│     │     ├─ NameArt_Scrivener   (Collapsed)
+│     │     └─ NameArt_Revenant    (Collapsed)
+│     ├─ PortraitBox (SizeBox 76x76) └─ Portrait  ← 头像
+│     └─ StatCol (VerticalBox)  HP/血条/腐蚀度/层数/卡组/符文/回合/体力/牌堆
+├─ StatusText (TextBlock)       顶栏下方的状态提示
+├─ HandBox / LeftCol            手牌与固定卡（原有，未改动）
+```
+
+### 换角色只改显隐
+
+四个角色的头像与字样**都已经摆进蓝图**了，三组是 `Collapsed`。
+换角色时把要显示的那组改成 Visible、其余 Collapsed 即可，不用重新指定贴图。
+
+⚠️ 用 `Collapsed` 而不是 `Hidden`。Hidden 仍然**占位**，
+三张隐藏的字样会把可见那张挤偏，而且挤多少取决于哪张最宽 —— 换角色时位置还会跳。
+
+设计器里想预览别的角色：Class Defaults 里改 `DesignPreviewHeroIndex`（0~3）。
+
+### 字样不要写死宽高
+
+四张字样的比例差异很大，是实测值：
+
+| | 尺寸 | 宽高比 |
+|---|---|---|
+| Warden | 289×799 | 0.362 |
+| Medium | 311×760 | 0.409 |
+| Scrivener | 296×566 | 0.523 |
+| Revenant | 286×836 | 0.342 |
+
+所以字样套在 `ScaleBox`（ScaleToFit）里按原比例缩放。
+**给 Image 设 Desired Size 会把这 0.34~0.52 的差异压成同一个形状**，
+三个角色的字样会变形 —— 而那看起来像是美术导错了图。
+要调大小请改 `NameArtBox` 的槽位尺寸，不要改 Image。
+
+头像是近正方形（617×611 等，比例≈1.01），所以它反而可以按方形槽位画。
+
+### 资产名有两处不一致（不是笔误）
+
+- 头像叫 `UI_Revanat_头像`（Rev**a**nat）
+- 字样叫 `UI_Revenat_字样`（Rev**e**nat）
+
+路径在 `Source/HexSpire/Public/UI/HexTopBarLayout.h` 里按实际名字写死了。
+改资产名的话要同步改那里，否则 `LoadObject` 静默失败（回退 nullptr → 不画图层，不报错）。
+
+### 顶栏文字已经全部 Bind 好了
+
+生成器把 14 条属性绑定一起写进了资产，**不需要手工点 Bind**：
+
+| 控件 | 属性 | 绑定函数 |
+|---|---|---|
+| `HeroHP` | Text / ColorAndOpacity | `GetHeroHPText` / `GetHeroHPSlateColor` |
+| `HPBar` | Percent / FillColorAndOpacity | `GetHeroHPPercent` / `GetHeroHPColor` |
+| `Corruption` | Text / ColorAndOpacity | `GetCorruptionText` / `GetCorruptionSlateColor` |
+| `CorruptionEffect` | Text | `GetCorruptionEffectText` |
+| `FloorInfo` / `DeckInfo` / `RuneInfo` | Text | `GetFloorText` / `GetDeckText` / `GetRuneText` |
+| `RoundNum` / `EnergyText` / `PileInfo` | Text | `GetRoundText` / `GetEnergyText` / `GetPileText` |
+| `StatusText` | Text | `GetStatusText` |
+
+⚠️ 颜色有 `*Color`（FLinearColor）和 `*SlateColor`（FSlateColor）两个版本，
+**不是冗余**：TextBlock 的 `ColorAndOpacity` 委托要 `FSlateColor`，
+ProgressBar 的 `FillColorAndOpacity` 要 `FLinearColor`。
+绑错类型会在编译蓝图时报 `the sigatnures don't match`。
+
+想让顶栏外观完全归蓝图：Class Defaults 里关掉 `bCppDrivesTopBar`
+（同卡面的 `bCppDrivesAppearance`，不关的话 C++ 每帧会把值刷回去）。
+
+### 为什么顶栏从 Canvas 搬过来了
+
+**因为 HUD 的 Canvas 绘制永远画在所有 UMG 之上。**
+
+顶栏原先是 `AHexDemoHUD::DrawTopBar` 画的一条 0,0→全宽×74 的实心面板。
+只要它还在，任何摆在左上角的 UMG 控件都会被它整块盖住 —— 而且**不报错**：
+控件存在、贴图加载成功、自检全过，屏幕上就是看不见。
+所以"头像放左上角"和"顶栏用 Canvas 画"没法共存，`DrawTopBar` 已删除。
+
+⚠️ 顺带搬的还有**状态提示**。它原先画在 `DrawTopBar` 内部（14,80），
+是 `GetStatusMessage()` 的**唯一**显示点 —— 漏掉它会让全部操作反馈
+（阵亡/胜利/体力不足/目标不合法/房间切换）无声消失。
+现在归 `StatusText`，自检里有一条专门盯它的告警。
+
+⚠️ `DrawPileBrowser` 原先写死 `Y=120`（那是"74px 顶栏之下"的隐含依赖），
+现在改读 `HexTopBarLayout::PileBrowserTop`。改顶栏高度时两处不会再各自漂移。
+
+### 验证
+
+```powershell
+& "E:\UE\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" `
+    "E:\UE_Proj\HexSpire\HexSpire.uproject" -game -HexAutoRoom `
+    -unattended -nopause -nosplash -windowed -ResX=1600 -ResY=900 `
+    -benchmark -benchmarkseconds=12 `
+    -AbsLog="E:\UE_Proj\HexSpire\Saved\Logs\tb.log"
+```
+
+日志里应该有（战斗中与地图界面**都要**跑一遍 —— 去掉 `-HexAutoRoom` 就是地图界面）：
+
+```
+[自检] 顶栏自检（当前在战斗中）
+[自检] 顶栏控件全部绑定成功
+[自检] 顶栏贴图：头像=有 字样=有
+[自检]   字样原始尺寸 289x799（比例 0.362）
+[自检]   顶栏渲染尺寸 1921x96（高度常量 96）
+```
+
+⚠️ 顶栏自检故意与卡面自检**分开**：卡面那个在"非战斗直接 return"之后，
+只在战斗中跑得到。而"顶栏在地图界面消失"正是这次改动最可能的回归
+（顶栏原先跟着整块控件一起折叠），只在战斗里自检的话永远测不出来。
+
+⚠️ **截图验证不了顶栏**。`HighResShot` 只抓场景渲染，不含 Slate 层 ——
+顶栏没显示和"截图抓不到顶栏"在图片上完全一样，看图会得出错误结论。
+日志自检是唯一可信的判据。

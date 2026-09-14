@@ -3,7 +3,6 @@
 #include "View/HexDemoPlayerController.h"
 #include "View/HexDemoGameMode.h"
 #include "View/HexBoardVisual.h"
-#include "View/HexDemoHUD.h"
 #include "Battle/HexBattleState.h"
 #include "Battle/HexBattleFlow.h"
 #include "Battle/HexUnit.h"

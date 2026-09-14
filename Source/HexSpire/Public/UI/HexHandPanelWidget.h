@@ -49,6 +49,10 @@
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
 #include "UI/HexCardWidget.h"
+// ⚠️ 必须是完整包含而非前置声明：下面 ResolveHeroArt() 返回
+//    HexTopBarLayout::FHeroUIArt 的引用，而命名空间里的嵌套结构
+//    没法用 `struct X::Y;` 这种形式前置声明（C++ 不允许限定名前置声明）。
+#include "UI/HexTopBarLayout.h"
 #include "HexHandPanelWidget.generated.h"
 
 class AHexDemoGameMode;
@@ -56,6 +60,10 @@ class UHorizontalBox;
 class UVerticalBox;
 class UCanvasPanel;
 class UTextBlock;
+class UImage;
+class UProgressBar;
+class UTexture2D;
+class UWidget;
 
 /**
  * 手牌 + 固定卡的容器。
@@ -128,6 +136,132 @@ public:
 		meta = (ClampMin = "0", ClampMax = "10"))
 	int32 DesignPreviewCardCount = 4;
 
+	// ══════════════════════════════════════════════════════════════
+	// 顶栏取值函数 —— 给蓝图做属性绑定
+	// ══════════════════════════════════════════════════════════════
+	// 顶栏原先是 HUD 用 Canvas 画的，现在整块搬到本控件里。
+	// 搬迁的理由不是"统一技术栈"，而是一个硬约束：
+	//
+	//   ⚠️ HUD 的 Canvas 绘制【永远画在所有 UMG 之上】。
+	//      所以只要顶栏还在 Canvas 上，左上角的头像就一定被它盖住 ——
+	//      而且不报错（控件存在、贴图加载成功、自检全过，就是看不见）。
+	//
+	// ⚠️ 必须是 BlueprintPure（纯函数）。UMG 的属性绑定只接受纯函数，
+	//    带副作用的函数在 Bind 下拉里【根本不会出现】，
+	//    而 UI 上不会提示为什么，只是列表里找不到。
+	//
+	// ⚠️ 每个函数都必须能在 Mode/RunState/BattleState 为空时返回合法值。
+	//    属性绑定在【设计器预览】里也会被调用，那时根本没有 GameMode ——
+	//    不判空会让美术一打开蓝图就崩编辑器。
+
+	/** 生命，形如 "镇妖者  HP 80/80" */
+	UFUNCTION(BlueprintPure, Category = "顶栏|文字")
+	FText GetHeroHPText() const;
+
+	/** 腐蚀度，形如 "腐蚀度 3" */
+	UFUNCTION(BlueprintPure, Category = "顶栏|文字")
+	FText GetCorruptionText() const;
+
+	/** 腐蚀度的后果换算，形如 "敌人 HP +24% ATK +18% 掉落品质↑" */
+	UFUNCTION(BlueprintPure, Category = "顶栏|文字")
+	FText GetCorruptionEffectText() const;
+
+	/** 层数与碎片，形如 "第 1 层 · 碎片 0" */
+	UFUNCTION(BlueprintPure, Category = "顶栏|文字")
+	FText GetFloorText() const;
+
+	/** 卡组占用，形如 "卡组 8/12" */
+	UFUNCTION(BlueprintPure, Category = "顶栏|文字")
+	FText GetDeckText() const;
+
+	/** 符文，形如 "符文 [裂魂][空][空]" */
+	UFUNCTION(BlueprintPure, Category = "顶栏|文字")
+	FText GetRuneText() const;
+
+	/** 回合数。不在战斗中返回空。 */
+	UFUNCTION(BlueprintPure, Category = "顶栏|文字")
+	FText GetRoundText() const;
+
+	/** 体力，形如 "体力 ◆◆◇◇◇  2/5"。不在战斗中返回空。 */
+	UFUNCTION(BlueprintPure, Category = "顶栏|文字")
+	FText GetEnergyText() const;
+
+	/** 牌堆计数，形如 "抽 5 · 弃 3 · 消耗 0"。不在战斗中返回空。 */
+	UFUNCTION(BlueprintPure, Category = "顶栏|文字")
+	FText GetPileText() const;
+
+	/**
+	 * 状态提示（"体力不足" / "你已阵亡" / …）。
+	 *
+	 * ⚠️ 这是 Mode->GetStatusMessage() 的【唯一】显示点。
+	 *    它原先画在 DrawTopBar 内部（14,80）。删顶栏时若漏掉它，
+	 *    全部操作反馈会无声消失 —— 玩家做了非法操作却得不到解释，
+	 *    而代码一行不报错。
+	 */
+	UFUNCTION(BlueprintPure, Category = "顶栏|文字")
+	FText GetStatusText() const;
+
+	/** HP 比例 0..1，供 ProgressBar 的 Percent 绑定 */
+	UFUNCTION(BlueprintPure, Category = "顶栏|状态")
+	float GetHeroHPPercent() const;
+
+	/**
+	 * HP 颜色：>50% 绿、>25% 黄、否则红。
+	 *
+	 * ⚠️ 有 FLinearColor 与 FSlateColor 两个版本，不是冗余：
+	 *    属性绑定要求函数签名与委托【严格一致】，而两边的类型不同 ——
+	 *      TextBlock::ColorAndOpacity     → FGetSlateColor
+	 *      ProgressBar::FillColorAndOpacity → FGetLinearColor
+	 *    只给一个的话，另一边在编译蓝图时会报
+	 *    "the sigatnures don't match" 而绑不上。
+	 */
+	UFUNCTION(BlueprintPure, Category = "顶栏|状态")
+	FLinearColor GetHeroHPColor() const;
+
+	/** 同上，FSlateColor 版 —— 给 TextBlock 的 ColorAndOpacity 绑定用 */
+	UFUNCTION(BlueprintPure, Category = "顶栏|状态")
+	FSlateColor GetHeroHPSlateColor() const;
+
+	/** 腐蚀度颜色：≥6 转红 */
+	UFUNCTION(BlueprintPure, Category = "顶栏|状态")
+	FLinearColor GetCorruptionColor() const;
+
+	/** 同上，FSlateColor 版 */
+	UFUNCTION(BlueprintPure, Category = "顶栏|状态")
+	FSlateColor GetCorruptionSlateColor() const;
+
+	/** 当前角色头像 */
+	UFUNCTION(BlueprintPure, Category = "顶栏|美术")
+	UTexture2D* GetPortraitTexture() const;
+
+	/** 当前角色字样（竖条，放在头像左边） */
+	UFUNCTION(BlueprintPure, Category = "顶栏|美术")
+	UTexture2D* GetNameArtTexture() const;
+
+	/**
+	 * C++ 是否接管顶栏的文字与外观。
+	 *
+	 * ⚠️ 与卡面的 bCppDrivesAppearance 同一个用途：默认 true 时 C++
+	 *    每帧刷一遍文字/颜色/贴图，于是【蓝图里设的值会被每帧覆盖】——
+	 *    看起来就是"改了完全没用"，而且没有任何报错。
+	 *
+	 *    把 Text/Percent/Brush 绑到上面那些纯函数之后，
+	 *    在 Class Defaults 里关掉它，顶栏就完全归蓝图。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "顶栏|外观")
+	bool bCppDrivesTopBar = true;
+
+	/**
+	 * 设计器里预览哪个角色的头像与字样。
+	 *
+	 * ⚠️ 只影响设计器。运行时按 RunState 的 HeroId 决定（目前恒为 warden）。
+	 *    存在的理由与 DesignPreviewCardCount 一样：不给预览的话，
+	 *    美术在蓝图里调头像位置时四张图全是 Collapsed，只能盲摆。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "预览",
+		meta = (ClampMin = "0", ClampMax = "3"))
+	int32 DesignPreviewHeroIndex = 0;
+
 protected:
 	virtual TSharedRef<SWidget> RebuildWidget() override;
 
@@ -154,6 +288,66 @@ protected:
 
 	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
 	UTextBlock* FixedTitle = nullptr;
+
+	// ── 顶栏。控件名见 HexTopBarLayout::N，必须逐字一致。
+	//
+	// ⚠️ 全部 Optional：美术在蓝图里删掉某一项（比如不要符文那行）
+	//    是合法的，此时对应指针为 nullptr，那一项不显示但不崩。
+	//    因此下面每处使用都必须逐个判空，不能"判一个当全有"。
+
+	/** 顶栏根容器。整块显隐用它。 */
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UWidget* TopBar = nullptr;
+
+	/** 头像 */
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UImage* Portrait = nullptr;
+
+	// 四个角色的字样各一张，运行时只留一张 Visible。
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UImage* NameArt_Warden = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UImage* NameArt_Medium = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UImage* NameArt_Scrivener = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UImage* NameArt_Revenant = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UTextBlock* HeroHP = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UProgressBar* HPBar = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UTextBlock* Corruption = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UTextBlock* CorruptionEffect = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UTextBlock* FloorInfo = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UTextBlock* DeckInfo = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UTextBlock* RuneInfo = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UTextBlock* RoundNum = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UTextBlock* EnergyText = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UTextBlock* PileInfo = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UTextBlock* StatusText = nullptr;
 
 
 private:
@@ -182,6 +376,29 @@ private:
 	static void HideExtra(TArray<UHexCardWidget*>& Pool, int32 UsedCount);
 
 	/**
+	 * 按当前状态刷新顶栏。
+	 *
+	 * ⚠️ 必须在"非战斗就整块折叠"之前调用 —— 顶栏在地图界面也要显示。
+	 *    照抄手牌那套折叠逻辑会让顶栏在非战斗时一起消失。
+	 */
+	void RefreshTopBar(AHexDemoGameMode* Mode);
+
+	/** 按 HeroId 切换四张字样的显隐，并刷新头像贴图 */
+	void ApplyHeroArt();
+
+	/** C++ 默认树里搭顶栏（没建蓝图时才走） */
+	void BuildTopBarDefaultTree(UCanvasPanel* Canvas);
+
+	/** 取当前该显示哪个角色的 UI 资产 */
+	const HexTopBarLayout::FHeroUIArt& ResolveHeroArt() const;
+
+	/** 拿 GameMode。设计器预览时返回 nullptr。 */
+	AHexDemoGameMode* GetMode() const;
+
+	/** 顶栏里未绑定的控件名（自检用，同卡面的 GetUnboundWidgetNames） */
+	TArray<FString> GetUnboundTopBarNames() const;
+
+	/**
 	 * 首次刷新后把关键事实写进日志（只写一次）。
 	 *
 	 * ⚠️ 存在的理由：UMG 的失败几乎全是静默的（贴图路径错、控件
@@ -191,7 +408,22 @@ private:
 	 */
 	void LogSelfCheckOnce();
 
+	/**
+	 * 顶栏自检（只写一次）。
+	 *
+	 * ⚠️ 与 LogSelfCheckOnce 分开是刻意的：那个在"非战斗直接 return"
+	 *    之后才调用，所以只在战斗中跑得到。而"顶栏在地图界面消失"
+	 *    正是顶栏搬进 UMG 后最可能的回归（它原先跟着整块控件一起折叠），
+	 *    只在战斗里自检的话这个回归永远测不出来。
+	 */
+	void LogTopBarCheckOnce(bool bInBattle);
+
 	bool bSelfCheckLogged = false;
+
+	bool bTopBarCheckLogged = false;
+
+	/** 顶栏自检的等待帧数（GetCachedGeometry 前几帧是全零） */
+	int32 TopBarRefreshCount = 0;
 
 	/** 刷新次数。自检要等布局完成（前几帧 GetCachedGeometry 是全零）。 */
 	int32 RefreshCount = 0;

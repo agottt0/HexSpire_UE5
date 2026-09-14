@@ -6,6 +6,7 @@
 #include "UI/HexCardWidget.h"
 #include "UI/HexCardWidgetWide.h"
 #include "UI/HexHandPanelWidget.h"
+#include "UI/HexTopBarLayout.h"
 #include "HexSpire.h"
 
 #if WITH_EDITOR
@@ -23,6 +24,9 @@
 #include "Components/Image.h"
 #include "Components/Overlay.h"
 #include "Components/OverlaySlot.h"
+#include "Components/ProgressBar.h"
+#include "Components/ScaleBox.h"
+#include "Components/ScaleBoxSlot.h"
 #include "Components/SizeBox.h"
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
@@ -39,6 +43,7 @@
 #include "UObject/SavePackage.h"
 
 namespace L = HexCardLayout;
+namespace TB = HexTopBarLayout;
 
 namespace
 {
@@ -72,17 +77,6 @@ namespace
 			W->bIsVariable = true;
 		}
 		return W;
-	}
-
-	void SetOverlayPad(UWidget* W, EHorizontalAlignment H, EVerticalAlignment V,
-		const FMargin& Pad = FMargin(0.0f))
-	{
-		if (UOverlaySlot* S = Cast<UOverlaySlot>(W->Slot))
-		{
-			S->SetHorizontalAlignment(H);
-			S->SetVerticalAlignment(V);
-			S->SetPadding(Pad);
-		}
 	}
 
 	void SetVBoxPad(UWidget* W, const FMargin& Pad,
@@ -160,6 +154,103 @@ namespace
 			return nullptr;
 		}
 		return BP;
+	}
+
+	/**
+	 * 给某个控件的某个属性挂上【属性绑定】，绑到父类的 BlueprintPure 函数。
+	 *
+	 * 这是"美术不必手工点 15 次 Bind"的那一步。
+	 *
+	 * ⚠️ PropertyName 是【属性名】而不是委托名。引擎会自己去找
+	 *    <PropertyName>Delegate 那个 FDelegateProperty
+	 *    （见 FDelegateEditorBinding::IsAttributePropertyBinding）——
+	 *    这里传 "Text"，引擎找的是 TextDelegate。
+	 *    传成 "TextDelegate" 会找 "TextDelegateDelegate"，静默不生效。
+	 *
+	 * ⚠️ MemberGuid 留空是【对的】。GUID 只用于"绑到蓝图图表里自建的
+	 *    函数"时跟踪改名（ToRuntimeBinding 里：GUID 有效才走 GUID 查名，
+	 *    否则直接用 FunctionName）。我们绑的是 C++ 原生函数，
+	 *    名字不会被蓝图改，直接用函数名即可。
+	 *
+	 * ⚠️ 目标函数必须是 BlueprintPure，且签名与委托【严格一致】
+	 *    （返回类型相同、无参数）。编译器会校验这两点
+	 *    （IsBindingValid：不纯报 "needs to be bound to a pure function"，
+	 *     签名不符报 "the sigatnures don't match"），
+	 *    所以写错这里会在编译蓝图时报错而不是静默失败 —— 这是好事。
+	 */
+	void AddBinding(UWidgetBlueprint* BP, const TCHAR* WidgetName,
+		const TCHAR* PropertyName, const TCHAR* FunctionName)
+	{
+		// 控件不存在就不加：美术可能故意删掉了那一项（Optional 绑定），
+		// 而给不存在的控件挂绑定会在编译时报 "Binding: ... target exist"。
+		if (!BP->WidgetTree || !BP->WidgetTree->FindWidget(FName(WidgetName)))
+		{
+			return;
+		}
+
+		FDelegateEditorBinding Binding;
+		Binding.ObjectName   = WidgetName;
+		Binding.PropertyName = FName(PropertyName);
+		Binding.FunctionName = FName(FunctionName);
+		Binding.Kind         = EBindingKind::Function;
+
+		// ⚠️ FDelegateEditorBinding 的 operator== 只比 ObjectName +
+		//    PropertyName（一个属性只允许绑一个函数）。
+		//    所以 AddUnique 天然做到"重跑不会堆重复绑定"。
+		BP->Bindings.AddUnique(Binding);
+	}
+
+	/**
+	 * 给顶栏挂满属性绑定。
+	 *
+	 * ⚠️ 这些函数名必须与 UHexHandPanelWidget 上的 UFUNCTION 同名。
+	 *    写错的后果不是静默 —— 蓝图编译会报错（见 AddBinding 的注释），
+	 *    所以这里不需要额外的自检。
+	 */
+	void AddTopBarBindings(UWidgetBlueprint* BP)
+	{
+		struct FBind
+		{
+			const TCHAR* Widget;
+			const TCHAR* Property;
+			const TCHAR* Function;
+		};
+
+		const FBind Binds[] =
+		{
+			// 文字
+			{ TB::N::HeroHP,     TEXT("Text"), TEXT("GetHeroHPText")          },
+			{ TB::N::Corruption, TEXT("Text"), TEXT("GetCorruptionText")      },
+			{ TEXT("CorruptionEffect"), TEXT("Text"), TEXT("GetCorruptionEffectText") },
+			{ TEXT("FloorInfo"), TEXT("Text"), TEXT("GetFloorText")           },
+			{ TB::N::DeckInfo,   TEXT("Text"), TEXT("GetDeckText")            },
+			{ TB::N::RuneInfo,   TEXT("Text"), TEXT("GetRuneText")            },
+			{ TB::N::RoundNum,   TEXT("Text"), TEXT("GetRoundText")           },
+			{ TB::N::EnergyText, TEXT("Text"), TEXT("GetEnergyText")          },
+			{ TB::N::PileInfo,   TEXT("Text"), TEXT("GetPileText")            },
+			{ TB::N::StatusText, TEXT("Text"), TEXT("GetStatusText")          },
+
+			// 颜色与进度
+			//
+			// ⚠️ TextBlock 与 ProgressBar 的颜色委托类型【不同】：
+			//      TextBlock::ColorAndOpacity       → FGetSlateColor
+			//      ProgressBar::FillColorAndOpacity → FGetLinearColor
+			//    所以这里分别绑 *SlateColor 版与 *Color 版。
+			//    绑错的话蓝图编译会报 "the sigatnures don't match"。
+			{ TB::N::HeroHP,     TEXT("ColorAndOpacity"),     TEXT("GetHeroHPSlateColor")     },
+			{ TB::N::Corruption, TEXT("ColorAndOpacity"),     TEXT("GetCorruptionSlateColor") },
+			{ TB::N::HPBar,      TEXT("Percent"),             TEXT("GetHeroHPPercent")        },
+			{ TB::N::HPBar,      TEXT("FillColorAndOpacity"), TEXT("GetHeroHPColor")          },
+		};
+
+		for (const FBind& B : Binds)
+		{
+			AddBinding(BP, B.Widget, B.Property, B.Function);
+		}
+
+		UE_LOG(LogHexSpire, Display,
+			TEXT("顶栏属性绑定已挂上 %d 条（美术不必手工点 Bind）"),
+			static_cast<int32>(UE_ARRAY_COUNT(Binds)));
 	}
 
 	/** 编译并存盘 */
@@ -240,7 +331,7 @@ namespace
 		// ── 卡框
 		UImage* Frame = MakeWidget<UImage>(Tree, L::N::Frame);
 		Ov->AddChild(Frame);
-		SetOverlayPad(Frame, HAlign_Fill, VAlign_Fill);
+		L::SetOverlaySlot(Frame, HAlign_Fill, VAlign_Fill);
 
 		// ⚠️ 必须在这里就把卡框贴图设上。
 		//    运行时 ApplyView 会按卡的稀有度重新设一次，所以从"功能"看
@@ -256,13 +347,13 @@ namespace
 		// ── 插画
 		UImage* Art = MakeWidget<UImage>(Tree, L::N::Art);
 		Ov->AddChild(Art);
-		SetOverlayPad(Art, HAlign_Fill, VAlign_Fill, L::ArtPad);
+		L::SetOverlaySlot(Art, HAlign_Fill, VAlign_Fill, L::ArtPad);
 
 		// ── 正文
 		{
 			UVerticalBox* Body = MakeWidget<UVerticalBox>(Tree, L::N::Body);
 			Ov->AddChild(Body);
-			SetOverlayPad(Body, HAlign_Fill, VAlign_Fill, L::BodyPad);
+			L::SetOverlaySlot(Body, HAlign_Fill, VAlign_Fill, L::BodyPad);
 
 			UImage* Icon = MakeWidget<UImage>(Tree, L::N::TypeIcon);
 			// 占位图标（运行时按卡类型替换）。同理：不设的话设计器里是白块。
@@ -319,7 +410,7 @@ namespace
 			Badge->SetPadding(L::CostBadgeInner);
 			Badge->SetBrushColor(L::ColCostBadge);
 			Ov->AddChild(Badge);
-			SetOverlayPad(Badge, HAlign_Left, VAlign_Top, L::CostBadgeSlotPad);
+			L::SetOverlaySlot(Badge, HAlign_Left, VAlign_Top, L::CostBadgeSlotPad);
 
 			UTextBlock* Cost = MakeWidget<UTextBlock>(Tree, L::N::Cost);
 			Cost->SetFont(LayoutFont(L::FontCost, true));
@@ -335,7 +426,7 @@ namespace
 		Tag->SetColorAndOpacity(FSlateColor(L::ColWarn));
 		Tag->SetText(FText::FromString(TEXT("消耗")));
 		Ov->AddChild(Tag);
-		SetOverlayPad(Tag, HAlign_Right, VAlign_Top, L::TagPad);
+		L::SetOverlaySlot(Tag, HAlign_Right, VAlign_Top, L::TagPad);
 
 		// ── 卡底快捷键
 		UTextBlock* Key = MakeWidget<UTextBlock>(Tree, L::N::Hotkey);
@@ -343,7 +434,7 @@ namespace
 		Key->SetColorAndOpacity(FSlateColor(L::ColInkSoft));
 		Key->SetText(FText::FromString(TEXT("[1]")));
 		Ov->AddChild(Key);
-		SetOverlayPad(Key, HAlign_Center, VAlign_Bottom, L::HotkeyPad);
+		L::SetOverlaySlot(Key, HAlign_Center, VAlign_Bottom, L::HotkeyPad);
 
 		// ── 不可用遮罩（半透白：冲淡而非压暗）
 		UBorder* Dim = MakeWidget<UBorder>(Tree, L::N::Dim);
@@ -353,7 +444,7 @@ namespace
 		//    运行时 ApplyView 会按 bPlayable 控制它的可见性。
 		Dim->SetVisibility(ESlateVisibility::Hidden);
 		Ov->AddChild(Dim);
-		SetOverlayPad(Dim, HAlign_Fill, VAlign_Fill);
+		L::SetOverlaySlot(Dim, HAlign_Fill, VAlign_Fill);
 	}
 
 	/**
@@ -396,7 +487,7 @@ namespace
 		// ── 横版卡框
 		UImage* Frame = MakeWidget<UImage>(Tree, L::N::Frame);
 		Ov->AddChild(Frame);
-		SetOverlayPad(Frame, HAlign_Fill, VAlign_Fill);
+		L::SetOverlaySlot(Frame, HAlign_Fill, VAlign_Fill);
 		// 设计器里要看得见卡框，否则是一个纯白方块，等于盲摆
 		if (UTexture2D* Tex = LoadObject<UTexture2D>(
 			nullptr, TEXT("/Game/ArtResource/Card/RCard_Attack.RCard_Attack")))
@@ -408,7 +499,7 @@ namespace
 		{
 			UHorizontalBox* Row = MakeWidget<UHorizontalBox>(Tree, TEXT("ContentRow"));
 			Ov->AddChild(Row);
-			SetOverlayPad(Row, HAlign_Fill, VAlign_Fill, L::R::ContentPad);
+			L::SetOverlaySlot(Row, HAlign_Fill, VAlign_Fill, L::R::ContentPad);
 
 			UImage* Icon = MakeWidget<UImage>(Tree, L::N::TypeIcon);
 			Icon->SetDesiredSizeOverride(L::R::IconSize);
@@ -467,7 +558,7 @@ namespace
 			Badge->SetPadding(L::R::CostInner);
 			Badge->SetBrushColor(L::ColCostBadge);
 			Ov->AddChild(Badge);
-			SetOverlayPad(Badge, HAlign_Left, VAlign_Top, L::R::CostSlotPad);
+			L::SetOverlaySlot(Badge, HAlign_Left, VAlign_Top, L::R::CostSlotPad);
 
 			UTextBlock* Cost = MakeWidget<UTextBlock>(Tree, L::N::Cost);
 			Cost->SetFont(LayoutFont(L::R::FontCost, true));
@@ -482,7 +573,7 @@ namespace
 		Dim->SetBrushColor(L::ColDimVeil);
 		Dim->SetVisibility(ESlateVisibility::Hidden);
 		Ov->AddChild(Dim);
-		SetOverlayPad(Dim, HAlign_Fill, VAlign_Fill);
+		L::SetOverlaySlot(Dim, HAlign_Fill, VAlign_Fill);
 	}
 
 	/**
@@ -491,6 +582,201 @@ namespace
 	 * ⚠️ 这里的控件名必须与 UHexHandPanelWidget 的 BindWidgetOptional
 	 *    同名：HandBox / FixedBox / FixedTitle。
 	 */
+	/**
+	 * 顶栏子树（左上角头像/字样 + 局内读数）。
+	 *
+	 * 结构与 UHexHandPanelWidget::BuildTopBarDefaultTree 【必须一致】——
+	 * 否则"没建蓝图"和"建了蓝图"两条路径的顶栏长得不一样，且不报错。
+	 *
+	 *   TopBar (Border, 锚顶边拉伸)
+	 *     └ TopRow (HorizontalBox)
+	 *         ├ NameArtBox (ScaleBox, ScaleToFit)   ← 字样竖条在左
+	 *         │   └ NameArtStack (Overlay)
+	 *         │       ├ NameArt_Warden    (Image, Visible)
+	 *         │       ├ NameArt_Medium    (Image, Collapsed)
+	 *         │       ├ NameArt_Scrivener (Image, Collapsed)
+	 *         │       └ NameArt_Revenant  (Image, Collapsed)
+	 *         ├ PortraitBox (SizeBox) └ Portrait (Image)  ← 头像在字样右边
+	 *         └ StatCol (VerticalBox)
+	 *             HeroHP / HPBarBox>HPBar / Corruption / CorruptionEffect
+	 *             / FloorInfo / DeckInfo / RuneInfo / RoundNum / EnergyText / PileInfo
+	 *   StatusText (TextBlock, 顶栏下方，挂在 Canvas 上)
+	 */
+	void BuildTopBarTree(UWidgetTree* Tree, UCanvasPanel* Canvas)
+	{
+		UBorder* Bar = MakeWidget<UBorder>(Tree, TB::N::TopBar);
+		Bar->SetBrushColor(TB::ColBarBg);
+		Bar->SetPadding(TB::BarPad);
+		Canvas->AddChild(Bar);
+		if (UCanvasPanelSlot* S = Cast<UCanvasPanelSlot>(Bar->Slot))
+		{
+			S->SetAnchors(FAnchors(0.0f, 0.0f, 1.0f, 0.0f));
+			S->SetOffsets(FMargin(0.0f, 0.0f, 0.0f, TB::BarHeight));
+			S->SetAlignment(FVector2D(0.0f, 0.0f));
+		}
+
+		UHorizontalBox* Row = MakeWidget<UHorizontalBox>(Tree, TB::N::TopRow);
+		Bar->AddChild(Row);
+
+		// ── 字样（在头像左边）
+		{
+			UScaleBox* ArtBox = MakeWidget<UScaleBox>(Tree, TB::N::NameArtBox);
+			// ⚠️ ScaleToFit 而不是写死尺寸：四个角色的字样比例实测是
+			//    0.362 / 0.409 / 0.523 / 0.342，写死宽高会让三个变形，
+			//    而美术会以为是自己导错了图。
+			ArtBox->SetStretch(EStretch::ScaleToFit);
+			Row->AddChild(ArtBox);
+			if (UHorizontalBoxSlot* S = Cast<UHorizontalBoxSlot>(ArtBox->Slot))
+			{
+				S->SetVerticalAlignment(VAlign_Fill);
+				S->SetPadding(TB::NameArtPad);
+			}
+
+			// ⚠️ ScaleBox 只接一个子控件，所以垫一层 Overlay 让四张字样
+			//    都能各自被 BindWidgetOptional 找到。
+			UOverlay* Stack = MakeWidget<UOverlay>(Tree, TEXT("NameArtStack"));
+			ArtBox->AddChild(Stack);
+
+			for (const TB::FHeroUIArt* Hero : TB::AllHeroes)
+			{
+				UImage* Img = MakeWidget<UImage>(Tree, Hero->NameArtWidget);
+				Stack->AddChild(Img);
+				L::SetOverlaySlot(Img, HAlign_Center, VAlign_Center);
+
+				// 设计器里要看得见图，否则是纯白方块，等于盲摆
+				if (UTexture2D* Tex = LoadObject<UTexture2D>(
+					nullptr, Hero->NameArtPath))
+				{
+					Img->SetBrushFromTexture(Tex, false);
+				}
+				else
+				{
+					UE_LOG(LogHexSpire, Warning,
+						TEXT("字样贴图加载失败：%s"), Hero->NameArtPath);
+				}
+
+				// ⚠️ 默认只留第一个可见，其余 Collapsed（不是 Hidden ——
+				//    Hidden 仍然占位，会把可见那张挤偏）。
+				Img->SetVisibility(Hero == &TB::Default()
+					? ESlateVisibility::HitTestInvisible
+					: ESlateVisibility::Collapsed);
+			}
+		}
+
+		// ── 头像
+		{
+			USizeBox* Box = MakeWidget<USizeBox>(Tree, TEXT("PortraitBox"));
+			// ⚠️ 用 Min/Max 而不是 WidthOverride —— 后者的 bOverride_ 位
+			//    存不进资产（实测记录见 HexCardLayout.h），蓝图路径下
+			//    尺寸会失控，头像会被文字撑变形。
+			Box->SetMinDesiredWidth(TB::PortraitSize);
+			Box->SetMaxDesiredWidth(TB::PortraitSize);
+			Box->SetMinDesiredHeight(TB::PortraitSize);
+			Box->SetMaxDesiredHeight(TB::PortraitSize);
+			Row->AddChild(Box);
+			if (UHorizontalBoxSlot* S = Cast<UHorizontalBoxSlot>(Box->Slot))
+			{
+				S->SetVerticalAlignment(VAlign_Center);
+				S->SetPadding(TB::PortraitPad);
+			}
+
+			UImage* Img = MakeWidget<UImage>(Tree, TB::N::Portrait);
+			Box->AddChild(Img);
+			if (UTexture2D* Tex = LoadObject<UTexture2D>(
+				nullptr, TB::Default().PortraitPath))
+			{
+				Img->SetBrushFromTexture(Tex, false);
+			}
+			else
+			{
+				UE_LOG(LogHexSpire, Warning,
+					TEXT("头像贴图加载失败：%s"), TB::Default().PortraitPath);
+			}
+			Img->SetDesiredSizeOverride(
+				FVector2D(TB::PortraitSize, TB::PortraitSize));
+		}
+
+		// ── 读数列
+		{
+			UVerticalBox* Col = MakeWidget<UVerticalBox>(Tree, TB::N::StatCol);
+			Row->AddChild(Col);
+			if (UHorizontalBoxSlot* S = Cast<UHorizontalBoxSlot>(Col->Slot))
+			{
+				S->SetVerticalAlignment(VAlign_Center);
+			}
+
+			// ⚠️ 占位文字不是装饰：空 TextBlock 在设计器里高度为 0，
+			//    美术会以为"这一行不存在"从而把间距调错。
+			//    运行时 RefreshTopBar 会覆盖它们。
+			auto MakeText = [&](const TCHAR* Name, int32 Size,
+				const FLinearColor& Color, const TCHAR* Placeholder) -> UTextBlock*
+			{
+				UTextBlock* T = MakeWidget<UTextBlock>(Tree, Name);
+				T->SetFont(LayoutFont(Size));
+				T->SetColorAndOpacity(FSlateColor(Color));
+				T->SetText(FText::FromString(Placeholder));
+				Col->AddChild(T);
+				SetVBoxPad(T, TB::RowPad, HAlign_Left);
+				return T;
+			};
+
+			MakeText(TB::N::HeroHP, TB::FontHP, TB::ColGood,
+				TEXT("镇妖者  HP 80/80"));
+
+			// 血条：必须套 SizeBox 定尺寸 —— UProgressBar 没有
+			// SetDesiredSizeOverride，不套的话高度会塌成 0。
+			USizeBox* BarBox = MakeWidget<USizeBox>(Tree, TEXT("HPBarBox"));
+			BarBox->SetMinDesiredWidth(TB::HPBarWidth);
+			BarBox->SetMaxDesiredWidth(TB::HPBarWidth);
+			BarBox->SetMinDesiredHeight(TB::HPBarHeight);
+			BarBox->SetMaxDesiredHeight(TB::HPBarHeight);
+			Col->AddChild(BarBox);
+			SetVBoxPad(BarBox, TB::RowPad, HAlign_Left);
+
+			UProgressBar* Bar2 = MakeWidget<UProgressBar>(Tree, TB::N::HPBar);
+			Bar2->SetFillColorAndOpacity(TB::ColHPFill);
+			Bar2->SetPercent(1.0f);
+			BarBox->AddChild(Bar2);
+
+			MakeText(TB::N::Corruption, TB::FontStat, TB::ColWarn,
+				TEXT("腐蚀度 0"));
+			MakeText(TEXT("CorruptionEffect"), TB::FontSmall, TB::ColDim,
+				TEXT("敌人 HP +0%  ATK +0%  掉落品质↑"));
+			MakeText(TEXT("FloorInfo"), TB::FontSmall, TB::ColDim,
+				TEXT("第 1 层 · 碎片 0"));
+			MakeText(TB::N::DeckInfo, TB::FontStat, TB::ColText,
+				TEXT("卡组 0/12"));
+			MakeText(TB::N::RuneInfo, TB::FontSmall, TB::ColDim,
+				TEXT("符文 [空][空][空]"));
+			MakeText(TB::N::RoundNum, TB::FontStat, TB::ColText,
+				TEXT("回合 1"));
+			MakeText(TB::N::EnergyText, TB::FontStat, TB::ColEnergy,
+				TEXT("体力 ◆◆◆◇◇  3/5"));
+			MakeText(TB::N::PileInfo, TB::FontSmall, TB::ColDim,
+				TEXT("抽 5 · 弃 0 · 消耗 0"));
+		}
+
+		// ── 状态提示
+		//
+		// ⚠️ 挂在 Canvas 上而不是顶栏容器内：它要能压在棋盘上方，
+		//    而且它是 GetStatusMessage() 的【唯一】显示点
+		//    （原先画在已删除的 DrawTopBar 里）。
+		{
+			UTextBlock* T = MakeWidget<UTextBlock>(Tree, TB::N::StatusText);
+			T->SetFont(LayoutFont(TB::FontStatus));
+			T->SetColorAndOpacity(FSlateColor(TB::ColWarn));
+			T->SetText(FText::FromString(TEXT("（状态提示）")));
+			Canvas->AddChild(T);
+			if (UCanvasPanelSlot* S = Cast<UCanvasPanelSlot>(T->Slot))
+			{
+				S->SetAnchors(FAnchors(0.0f, 0.0f, 0.0f, 0.0f));
+				S->SetAlignment(FVector2D(0.0f, 0.0f));
+				S->SetOffsets(TB::StatusPad);
+				S->SetAutoSize(true);
+			}
+		}
+	}
+
 	void BuildHandPanelTree(UWidgetTree* Tree)
 	{
 		UCanvasPanel* Canvas = MakeWidget<UCanvasPanel>(Tree, TEXT("PanelRoot"));
@@ -527,6 +813,9 @@ namespace
 
 		UVerticalBox* Fixed = MakeWidget<UVerticalBox>(Tree, TEXT("FixedBox"));
 		LeftCol->AddChild(Fixed);
+
+		// ── 顶栏（含左上角头像与字样）
+		BuildTopBarTree(Tree, Canvas);
 	}
 }
 
@@ -564,6 +853,16 @@ int32 UHexBuildCardWidgetCommandlet::Main(const FString& Params)
 		UClass* Parent;
 		void (*Build)(UWidgetTree*);
 		const TCHAR* Label;
+
+		/**
+		 * 建好树之后挂属性绑定（可为空）。
+		 *
+		 * ⚠️ 必须在 Build 之后、CompileAndSave 之前调用 ——
+		 *    AddBinding 会先查控件是否存在（给不存在的控件挂绑定
+		 *    会在编译时报错），所以树必须先建好；
+		 *    而绑定要参与编译才能生效，所以必须在存盘前。
+		 */
+		void (*Bind)(UWidgetBlueprint*) = nullptr;
 	};
 
 	const FTarget Targets[] =
@@ -573,7 +872,8 @@ int32 UHexBuildCardWidgetCommandlet::Main(const FString& Params)
 		{ TEXT("/Game/HexSpire/UI/WB_CardWide"),
 		  UHexCardWidgetWide::StaticClass(), &BuildWideCardTree,  TEXT("横版固定卡") },
 		{ TEXT("/Game/HexSpire/UI/WB_HandPanel"),
-		  UHexHandPanelWidget::StaticClass(), &BuildHandPanelTree, TEXT("手牌区") },
+		  UHexHandPanelWidget::StaticClass(), &BuildHandPanelTree, TEXT("手牌区"),
+		  &AddTopBarBindings },
 	};
 
 	int32 Built = 0;
@@ -658,6 +958,12 @@ int32 UHexBuildCardWidgetCommandlet::Main(const FString& Params)
 			{
 				BP->OnVariableAdded(W->GetFName());
 			}
+		}
+
+		// ⚠️ 挂绑定必须在建树之后、编译存盘之前 —— 见 FTarget::Bind 的注释。
+		if (T.Bind)
+		{
+			T.Bind(BP);
 		}
 
 		if (CompileAndSave(BP))

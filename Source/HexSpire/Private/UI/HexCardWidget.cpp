@@ -51,17 +51,6 @@ namespace
 		return HexCardLayout::GetCardFont(Size, bBold);
 	}
 
-	/** 给 Overlay 的子项设置对齐与边距 */
-	void SetOverlaySlot(UWidget* W, EHorizontalAlignment H, EVerticalAlignment V,
-		const FMargin& Pad = FMargin(0.0f))
-	{
-		if (UOverlaySlot* S = Cast<UOverlaySlot>(W->Slot))
-		{
-			S->SetHorizontalAlignment(H);
-			S->SetVerticalAlignment(V);
-			S->SetPadding(Pad);
-		}
-	}
 }
 
 // ═══════════════════════════════════════════════════════ FHexCardView
@@ -146,19 +135,19 @@ void UHexCardWidget::BuildDefaultTree()
 	// ── ① 卡框（最底层，铺满）
 	Frame = WidgetTree->ConstructWidget<UImage>(UImage::StaticClass(), L::N::Frame);
 	MainOverlay->AddChild(Frame);
-	SetOverlaySlot(Frame, HAlign_Fill, VAlign_Fill);
+	L::SetOverlaySlot(Frame, HAlign_Fill, VAlign_Fill);
 
 	// ── ② 插画（在框之上、文字之下）
 	Art = WidgetTree->ConstructWidget<UImage>(UImage::StaticClass(), L::N::Art);
 	MainOverlay->AddChild(Art);
-	SetOverlaySlot(Art, HAlign_Fill, VAlign_Fill, L::ArtPad);
+	L::SetOverlaySlot(Art, HAlign_Fill, VAlign_Fill, L::ArtPad);
 
 	// ── ③ 正文（图标 + 卡名 + 类型 + 描述 + 射程），竖排
 	{
 		UVerticalBox* Body = WidgetTree->ConstructWidget<UVerticalBox>(
 			UVerticalBox::StaticClass(), L::N::Body);
 		MainOverlay->AddChild(Body);
-		SetOverlaySlot(Body, HAlign_Fill, VAlign_Fill, L::BodyPad);
+		L::SetOverlaySlot(Body, HAlign_Fill, VAlign_Fill, L::BodyPad);
 
 		// 类型图标
 		TypeIcon = WidgetTree->ConstructWidget<UImage>(UImage::StaticClass(), L::N::TypeIcon);
@@ -225,7 +214,7 @@ void UHexCardWidget::BuildDefaultTree()
 		CostBadge->SetPadding(L::CostBadgeInner);
 		CostBadge->SetBrushColor(L::ColCostBadge);
 		MainOverlay->AddChild(CostBadge);
-		SetOverlaySlot(CostBadge, HAlign_Left, VAlign_Top, L::CostBadgeSlotPad);
+		L::SetOverlaySlot(CostBadge, HAlign_Left, VAlign_Top, L::CostBadgeSlotPad);
 
 		Cost = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), L::N::Cost);
 		Cost->SetFont(CardFont(L::FontCost, true));
@@ -237,13 +226,13 @@ void UHexCardWidget::BuildDefaultTree()
 	Tag = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), L::N::Tag);
 	Tag->SetFont(CardFont(L::FontTag, true));
 	MainOverlay->AddChild(Tag);
-	SetOverlaySlot(Tag, HAlign_Right, VAlign_Top, L::TagPad);
+	L::SetOverlaySlot(Tag, HAlign_Right, VAlign_Top, L::TagPad);
 
 	// ── ⑥ 底部：键盘提示（序号从左上角挪到这里）
 	Hotkey = WidgetTree->ConstructWidget<UTextBlock>(UTextBlock::StaticClass(), L::N::Hotkey);
 	Hotkey->SetFont(CardFont(L::FontKey, true));
 	MainOverlay->AddChild(Hotkey);
-	SetOverlaySlot(Hotkey, HAlign_Center, VAlign_Bottom, L::HotkeyPad);
+	L::SetOverlaySlot(Hotkey, HAlign_Center, VAlign_Bottom, L::HotkeyPad);
 
 	// ── ⑦ 不可用遮罩（最上层）
 	//
@@ -252,7 +241,7 @@ void UHexCardWidget::BuildDefaultTree()
 	Dim->SetBrushColor(L::ColDimVeil);
 	Dim->SetVisibility(ESlateVisibility::Hidden);
 	MainOverlay->AddChild(Dim);
-	SetOverlaySlot(Dim, HAlign_Fill, VAlign_Fill);
+	L::SetOverlaySlot(Dim, HAlign_Fill, VAlign_Fill);
 
 	// ⚠️ 选中描边控件已删除 —— 选中改为上浮表现（见头文件）。
 	//    描边在浅色卡上尤其糟：黄边压在白纸上会和"消耗"角标的

@@ -5,6 +5,7 @@
 #include "View/HexDemoPlayerController.h"
 #include "View/HexBoardVisual.h"
 #include "UI/HexHandPanelWidget.h"
+#include "UI/HexTopBarLayout.h"
 #include "HexSpire.h"
 
 #include "Blueprint/UserWidget.h"
@@ -145,7 +146,9 @@ void AHexDemoHUD::DrawHUD()
 		bTabWasDown = bTabDown;
 	}
 
-	DrawTopBar(Mode);
+	// ⚠️ 这里【曾经】是 DrawTopBar(Mode)。顶栏已整块搬进控件蓝图 ——
+	//    Canvas 画的东西永远盖在 UMG 之上，留着它左上角的头像就永远看不见。
+	//    顶栏与状态提示现在都由 EnsureHandPanel 里那个控件负责。
 
 	// 手牌与固定卡是 UMG 控件，每帧只需同步内容（不参与 Canvas 绘制）。
 	// ⚠️ 放在 IsInBattle 判断【外面】：不在战斗时也要调用，
@@ -172,102 +175,20 @@ void AHexDemoHUD::DrawHUD()
 	DrawHelp(Mode);
 }
 
-// ══════════════════════════════════════════════════════════ 顶栏
-
-void AHexDemoHUD::DrawTopBar(AHexDemoGameMode* Mode)
-{
-	const float W = Canvas->SizeX;
-	DrawPanel(0, 0, W, 74.0f, ColPanel, 0.85f);
-
-	const FHexRunState* Run = Mode->GetRunState();
-	if (!Run)
-	{
-		return;
-	}
-
-	float X = 14.0f;
-	const float Y0 = 8.0f;
-	const float Y1 = 30.0f;
-	const float Y2 = 51.0f;
-
-	// ── 生命
-	{
-		const float Ratio = Run->HeroHPMax > 0
-			? static_cast<float>(Run->HeroHP) / Run->HeroHPMax : 0.0f;
-		DrawTextShadowed(FString::Printf(TEXT("镇妖者  HP %d/%d"),
-			Run->HeroHP, Run->HeroHPMax), X, Y0,
-			Ratio > 0.5f ? ColGood : (Ratio > 0.25f ? ColWarn : ColBad));
-
-		// 血条
-		const float BarW = 200.0f;
-		DrawRect(FLinearColor(0.15f, 0.05f, 0.05f, 0.9f), X, Y1, BarW, 10.0f);
-		DrawRect(FLinearColor(0.25f, 0.85f, 0.35f, 0.95f), X, Y1, BarW * Ratio, 10.0f);
-	}
-
-	X += 230.0f;
-
-	// ── §13.2 硬需求 5：腐蚀度与 Boss 强度【明示】
-	//
-	// ⚠️ 不能只显示"腐蚀度 5"这个裸数字 —— 玩家不知道它意味着什么。
-	//    必须把它换算成可读的后果（敌人强度百分比），
-	//    否则 D4 的"要不要多探一间"决策缺少判断依据。
-	{
-		const float HpBoost = Run->Corruption * HexK::CorruptionEnemyHpStep * 100.0f;
-		const float AtkBoost = Run->Corruption * HexK::CorruptionEnemyAtkStep * 100.0f;
-
-		DrawTextShadowed(FString::Printf(TEXT("腐蚀度 %d"), Run->Corruption),
-			X, Y0, Run->Corruption >= 6 ? ColBad : ColWarn);
-		DrawTextShadowed(FString::Printf(
-			TEXT("敌人 HP +%.0f%%  ATK +%.0f%%  掉落品质↑"), HpBoost, AtkBoost),
-			X, Y1 - 2.0f, ColDim);
-		DrawTextShadowed(FString::Printf(
-			TEXT("第 %d 层 · 碎片 %d"), Run->FloorIndex, Run->Shards),
-			X, Y2, ColDim);
-	}
-
-	X += 300.0f;
-
-	// ── 卡组与符文
-	{
-		DrawTextShadowed(FString::Printf(TEXT("卡组 %d/%d"),
-			Run->GetUsedCapacity(), Run->DeckCapacity), X, Y0, ColText);
-
-		FString Runes;
-		for (int32 I = 0; I < FHexRuneLoadout::SlotCount; ++I)
-		{
-			const FHexRuneData* R = Run->RuneLoadout.GetSlot(I);
-			Runes += R ? FString::Printf(TEXT("[%s]"), *R->DisplayName) : TEXT("[空]");
-		}
-		DrawTextShadowed(TEXT("符文 ") + Runes, X, Y1 - 2.0f, ColDim);
-	}
-
-	// ── 战斗中：回合与体力
-	if (Mode->IsInBattle())
-	{
-		if (const FHexBattleState* BS = Mode->GetBattleState())
-		{
-			const float RX = W - 260.0f;
-			DrawTextShadowed(FString::Printf(TEXT("回合 %d"), BS->RoundNumber),
-				RX, Y0, ColText);
-
-			const int32 EnergyMax = FHexRuleBook::EnergyMax(*BS);
-			FString Pips;
-			for (int32 I = 0; I < EnergyMax; ++I)
-			{
-				Pips += (I < BS->Energy) ? TEXT("◆") : TEXT("◇");
-			}
-			DrawTextShadowed(FString::Printf(TEXT("体力 %s  %d/%d"),
-				*Pips, BS->Energy, EnergyMax), RX, Y1 - 2.0f, ColEnergy);
-
-			DrawTextShadowed(FString::Printf(TEXT("抽 %d · 弃 %d · 消耗 %d"),
-				BS->Piles.NumDraw(), BS->Piles.NumDiscard(), BS->Piles.NumExhaust()),
-				RX, Y2, ColDim);
-		}
-	}
-
-	// ── 状态提示
-	DrawTextShadowed(Mode->GetStatusMessage(), 14.0f, 80.0f, ColWarn);
-}
+// ══════════════════════════════════════════════════════════ 顶栏已移除
+//
+// DrawTopBar 已删除 —— 顶栏整块搬进了 UHexHandPanelWidget（控件蓝图）。
+//
+// ⚠️ 搬迁的理由不是"统一技术栈"，而是一个硬约束：
+//    HUD 的 Canvas 绘制【永远画在所有 UMG 之上】。
+//    于是"把头像放到左上角"与"顶栏用 Canvas 画"直接冲突 ——
+//    任何摆在左上角的 UMG 控件都会被那条 74px 的实心面板盖住，
+//    而且不报错（控件存在、贴图加载成功、自检全过，就是看不见）。
+//
+// ⚠️ 状态提示（Mode->GetStatusMessage）原先也画在这里（14,80），
+//    那是它的【唯一】显示点。它现在由控件的 StatusText 负责，
+//    控件自检里有一条专门盘它的告警 —— 漏掉它的后果是
+//    全部操作反馈（阵亡/胜利/体力不足/目标不合法）无声消失。
 
 // ══════════════════════════════════════════════════════════ 地图面板
 
@@ -691,7 +612,10 @@ void AHexDemoHUD::DrawPileBrowser(AHexDemoGameMode* Mode)
 	const float W = 300.0f;
 	const float H = Canvas->SizeY * 0.62f;
 	const float X = Canvas->SizeX - W - 12.0f;
-	const float Y = 120.0f;
+	// ⚠️ 这里曾经写死 120.0f，那是"74px 顶栏之下"的隐含依赖。
+	//    顶栏搬进 UMG 后高度由 HexTopBarLayout 定，两处各自写数值
+	//    会在改顶栏高度时漂移（表现是牌堆浏览器压住顶栏，或留一道空隙）。
+	const float Y = HexTopBarLayout::PileBrowserTop;
 
 	DrawPanel(X, Y, W, H, ColPanel, 0.93f);
 	DrawSolidBox(X, Y, W, H, FLinearColor(0.40f, 0.45f, 0.50f), 2.0f);
