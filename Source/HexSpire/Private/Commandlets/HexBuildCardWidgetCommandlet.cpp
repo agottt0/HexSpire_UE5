@@ -17,6 +17,8 @@
 
 #include "Components/Border.h"
 #include "Components/BorderSlot.h"
+#include "Components/Button.h"
+#include "Components/ButtonSlot.h"
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Components/HorizontalBox.h"
@@ -229,6 +231,9 @@ namespace
 			{ TB::N::EnergyText, TEXT("Text"), TEXT("GetEnergyText")          },
 			{ TB::N::PileInfo,   TEXT("Text"), TEXT("GetPileText")            },
 			{ TB::N::StatusText, TEXT("Text"), TEXT("GetStatusText")          },
+
+			// 右下角操作区
+			{ TB::N::EnergyCount, TEXT("Text"), TEXT("GetEnergyCountText")   },
 
 			// 颜色与进度
 			//
@@ -777,6 +782,106 @@ namespace
 		}
 	}
 
+	/**
+	 * 右下角操作区（结束回合按钮 + 体力火苗）。
+	 *
+	 * 结构与 UHexHandPanelWidget::BuildActionAreaDefaultTree 【必须一致】。
+	 *
+	 *   ActionCol (VerticalBox, 锚右下角, AutoSize)
+	 *     ├ EnergyRow (HorizontalBox)       ← 火苗在运行时增删，这里是空的
+	 *     │   └ EnergyCount (TextBlock)     ← 读数在火苗右边
+	 *     └ EndTurnBox (SizeBox 104x104)
+	 *         └ EndTurnButton (Button)
+	 */
+	void BuildActionAreaTree(UWidgetTree* Tree, UCanvasPanel* Canvas)
+	{
+		UVerticalBox* Col = MakeWidget<UVerticalBox>(Tree, TB::N::ActionCol);
+		Canvas->AddChild(Col);
+		if (UCanvasPanelSlot* S = Cast<UCanvasPanelSlot>(Col->Slot))
+		{
+			S->SetAnchors(FAnchors(1.0f, 1.0f, 1.0f, 1.0f));
+			S->SetAlignment(FVector2D(1.0f, 1.0f));
+			S->SetOffsets(TB::ActionPad);
+			// ⚠️ AutoSize 必须开：不开的话 Slate 拿 Offset 的 Right/Bottom
+			//    当【尺寸】用（SConstraintCanvas::OnArrangeChildren），
+			//    20px 的内缩会被当成 20x20 的槽位，104px 的按钮被挤成 20px。
+			S->SetAutoSize(true);
+		}
+
+		// ── 体力火苗那一行（火苗本身运行时才建 —— 个数由体力上限决定）
+		{
+			UHorizontalBox* Row = MakeWidget<UHorizontalBox>(Tree, TB::N::EnergyRow);
+			Col->AddChild(Row);
+			SetVBoxPad(Row, TB::EnergyRowPad, HAlign_Right);
+
+			UTextBlock* Count = MakeWidget<UTextBlock>(Tree, TB::N::EnergyCount);
+			Count->SetFont(LayoutFont(TB::FontStat, /*bBold*/true));
+			Count->SetColorAndOpacity(FSlateColor(TB::ColEnergy));
+			// 占位：空 TextBlock 在设计器里高度为 0，美术会以为这行不存在
+			Count->SetText(FText::FromString(TEXT("3/5")));
+			Row->AddChild(Count);
+			if (UHorizontalBoxSlot* S = Cast<UHorizontalBoxSlot>(Count->Slot))
+			{
+				S->SetVerticalAlignment(VAlign_Center);
+				S->SetPadding(TB::EnergyCountPad);
+			}
+
+			// ⚠️ 设计器里这一行只有读数、没有火苗 —— 火苗是运行时建的。
+			//    美术想预览火苗请改 Class Defaults 里的 DesignPreviewEnergy。
+		}
+
+		// ── 结束回合按钮
+		{
+			USizeBox* Box = MakeWidget<USizeBox>(Tree, TEXT("EndTurnBox"));
+			// 同前：Min/Max 而不是 WidthOverride（后者的 bOverride_ 位存不进资产）
+			Box->SetMinDesiredWidth(TB::EndTurnSize);
+			Box->SetMaxDesiredWidth(TB::EndTurnSize);
+			Box->SetMinDesiredHeight(TB::EndTurnSize);
+			Box->SetMaxDesiredHeight(TB::EndTurnSize);
+			Col->AddChild(Box);
+			SetVBoxPad(Box, FMargin(0.0f), HAlign_Right);
+
+			UButton* Btn = MakeWidget<UButton>(Tree, TB::N::EndTurnButton);
+			Box->AddChild(Btn);
+
+			// ⚠️ 样式必须【写进资产】。只在运行时 ApplyEndTurnStyle 的话
+			//    设计器里是个灰色圆角方块，美术会以为贴图没配上
+			//    （而运行时其实是对的 —— 这正是上一轮 Frame 贴图那个坑）。
+			if (UTexture2D* Tex = LoadObject<UTexture2D>(nullptr, TB::EndTurnPath))
+			{
+				FButtonStyle Style = Btn->GetStyle();
+
+				auto MakeBrush = [Tex](const FLinearColor& Tint)
+				{
+					FSlateBrush B;
+					B.SetResourceObject(Tex);
+					B.SetImageSize(FVector2D(TB::EndTurnSize, TB::EndTurnSize));
+					// ⚠️ Image 而不是默认的 Box：这张印章不是九宫格资产，
+					//    边缘的尖角是造型的一部分，按 Box 拉伸会糊掉。
+					B.DrawAs = ESlateBrushDrawType::Image;
+					B.TintColor = FSlateColor(Tint);
+					return B;
+				};
+
+				// 三态全给 —— 只设 Normal 的话鼠标一悬停就回退成灰方块
+				Style.SetNormal(MakeBrush(TB::ColEndTurnOn));
+				Style.SetHovered(MakeBrush(TB::ColEndTurnHover));
+				Style.SetPressed(MakeBrush(TB::ColEndTurnPress));
+				Style.SetDisabled(MakeBrush(TB::ColEndTurnOff));
+				// 引擎默认样式带内边距，留着会把印章缩小并让按下时跳一下
+				Style.SetNormalPadding(FMargin(0.0f));
+				Style.SetPressedPadding(FMargin(0.0f));
+
+				Btn->SetStyle(Style);
+			}
+			else
+			{
+				UE_LOG(LogHexSpire, Warning,
+					TEXT("结束回合贴图加载失败：%s"), TB::EndTurnPath);
+			}
+		}
+	}
+
 	void BuildHandPanelTree(UWidgetTree* Tree)
 	{
 		UCanvasPanel* Canvas = MakeWidget<UCanvasPanel>(Tree, TEXT("PanelRoot"));
@@ -816,6 +921,9 @@ namespace
 
 		// ── 顶栏（含左上角头像与字样）
 		BuildTopBarTree(Tree, Canvas);
+
+		// ── 右下角操作区（结束回合按钮 + 体力火苗）
+		BuildActionAreaTree(Tree, Canvas);
 	}
 }
 

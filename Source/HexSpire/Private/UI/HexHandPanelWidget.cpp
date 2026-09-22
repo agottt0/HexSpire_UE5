@@ -22,6 +22,8 @@
 #include "Blueprint/WidgetTree.h"
 #include "Components/Border.h"
 #include "Components/BorderSlot.h"
+#include "Components/Button.h"
+#include "Components/ButtonSlot.h"
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Components/HorizontalBox.h"
@@ -39,6 +41,9 @@
 #include "Engine/Engine.h"
 #include "Engine/Font.h"
 #include "Engine/Texture2D.h"
+// FParse::Param —— 自检里的"模拟点击"只在 -HexAutoRoom 下执行
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 #include "Styling/CoreStyle.h"
 #include "Kismet/GameplayStatics.h"
 
@@ -120,6 +125,9 @@ TSharedRef<SWidget> UHexHandPanelWidget::RebuildWidget()
 
 	// ── 顶栏（左上角头像/字样 + 局内读数）
 	BuildTopBarDefaultTree(RootCanvas);
+
+	// ── 右下角操作区（体力火苗 + 结束回合按钮）
+	BuildActionAreaDefaultTree(RootCanvas);
 
 	WidgetTree->RootWidget = RootCanvas;
 
@@ -295,6 +303,194 @@ void UHexHandPanelWidget::BuildTopBarDefaultTree(UCanvasPanel* Canvas)
 	}
 }
 
+// ══════════════════════════════════════════════════ 右下角操作区默认树
+
+void UHexHandPanelWidget::BuildActionAreaDefaultTree(UCanvasPanel* Canvas)
+{
+	if (!Canvas)
+	{
+		return;
+	}
+
+	// 与 commandlet 生成的蓝图结构【必须一致】，理由同顶栏：
+	// 两条路径产出的外观不一样时【不会报错】，只能靠眼睛发现。
+	//
+	// 摆右下角的理由：手牌横排锚底边中点、固定卡锚左侧、
+	// 图例（DrawLegend）在右侧垂直居中 —— 右下角是底部唯一空着的地方，
+	// 而"结束回合"必须离手牌近：出完牌后的下一个动作就是它。
+
+	UVerticalBox* Col = WidgetTree->ConstructWidget<UVerticalBox>(
+		UVerticalBox::StaticClass(), FName(TB::N::ActionCol));
+	Canvas->AddChild(Col);
+	if (UCanvasPanelSlot* S = Cast<UCanvasPanelSlot>(Col->Slot))
+	{
+		// 锚右下角，自身以右下角对齐 —— 分辨率变化时始终贴着右下
+		S->SetAnchors(FAnchors(1.0f, 1.0f, 1.0f, 1.0f));
+		S->SetAlignment(FVector2D(1.0f, 1.0f));
+		S->SetOffsets(TB::ActionPad);
+		// ⚠️ AutoSize 必须开。不开的话 Slate 会拿 Offset 的
+		//    Right/Bottom 当【尺寸】用（见 SConstraintCanvas::OnArrangeChildren），
+		//    于是这里的 20/20 内缩会被解释成 20x20 的槽位，
+		//    104px 的按钮被挤成 20px —— 表现是"按钮小得几乎看不见"。
+		S->SetAutoSize(true);
+	}
+	ActionCol = Col;
+
+	// ── 体力火苗（在按钮【上方】）
+	//
+	// ⚠️ 放按钮上方而不是左边：火苗数量会变（体力上限受符文影响），
+	//    放左边的话整块会随体力数左右伸缩，按钮位置跟着漂 ——
+	//    而按钮要肌肉记忆，位置必须钉死。放上方则只有火苗那一行变宽。
+	{
+		UHorizontalBox* Row = WidgetTree->ConstructWidget<UHorizontalBox>(
+			UHorizontalBox::StaticClass(), FName(TB::N::EnergyRow));
+		Col->AddChild(Row);
+		if (UVerticalBoxSlot* S = Cast<UVerticalBoxSlot>(Row->Slot))
+		{
+			S->SetPadding(TB::EnergyRowPad);
+			// 右对齐 —— 让火苗这一行与按钮右边缘齐平，
+			// 否则火苗变多时整块看起来在左右晃
+			S->SetHorizontalAlignment(HAlign_Right);
+		}
+		EnergyRow = Row;
+
+		EnergyCount = WidgetTree->ConstructWidget<UTextBlock>(
+			UTextBlock::StaticClass(), FName(TB::N::EnergyCount));
+		EnergyCount->SetFont(HexCardLayout::GetCardFont(TB::FontStat, /*bBold*/true));
+		EnergyCount->SetColorAndOpacity(FSlateColor(TB::ColEnergy));
+		Row->AddChild(EnergyCount);
+		if (UHorizontalBoxSlot* S = Cast<UHorizontalBoxSlot>(EnergyCount->Slot))
+		{
+			S->SetVerticalAlignment(VAlign_Center);
+			S->SetPadding(TB::EnergyCountPad);
+		}
+	}
+
+	// ── 结束回合按钮
+	{
+		USizeBox* Box = WidgetTree->ConstructWidget<USizeBox>(
+			USizeBox::StaticClass(), TEXT("EndTurnBox"));
+		// ⚠️ 用 Min/Max 而不是 WidthOverride —— 后者的 bOverride_ 位
+		//    存不进资产（实测记录见 HexCardLayout.h），蓝图路径下
+		//    按钮尺寸会失控。两条路径写法保持同一套。
+		Box->SetMinDesiredWidth(TB::EndTurnSize);
+		Box->SetMaxDesiredWidth(TB::EndTurnSize);
+		Box->SetMinDesiredHeight(TB::EndTurnSize);
+		Box->SetMaxDesiredHeight(TB::EndTurnSize);
+		Col->AddChild(Box);
+		if (UVerticalBoxSlot* S = Cast<UVerticalBoxSlot>(Box->Slot))
+		{
+			S->SetHorizontalAlignment(HAlign_Right);
+		}
+
+		EndTurnButton = WidgetTree->ConstructWidget<UButton>(
+			UButton::StaticClass(), FName(TB::N::EndTurnButton));
+		Box->AddChild(EndTurnButton);
+		ApplyEndTurnStyle();
+	}
+}
+
+void UHexHandPanelWidget::ApplyEndTurnStyle()
+{
+	if (!EndTurnButton)
+	{
+		return;
+	}
+
+	UTexture2D* Tex = LoadObject<UTexture2D>(nullptr, TB::EndTurnPath);
+	if (!Tex)
+	{
+		// ⚠️ 不 return —— 贴图缺失时保留引擎默认样式（灰方块）。
+		//    按钮仍然能点，只是丑。悄悄不画的话玩家连"这里有个按钮"
+		//    都不知道，而结束回合是每回合必用的操作。
+		UE_LOG(LogHexSpire, Warning,
+			TEXT("结束回合贴图加载失败：%s —— 按钮回退到引擎默认样式"),
+			TB::EndTurnPath);
+		return;
+	}
+
+	FButtonStyle Style = EndTurnButton->GetStyle();
+
+	// ⚠️ 三态必须【全部】赋值。只设 Normal 的话，鼠标一移上去
+	//    Hovered 会回退到引擎默认的灰色圆角方块 ——
+	//    表现是"印章一碰就变成灰方块"，看起来像贴图丢了。
+	auto MakeBrush = [Tex](const FLinearColor& Tint)
+	{
+		FSlateBrush B;
+		B.SetResourceObject(Tex);
+		B.SetImageSize(FVector2D(TB::EndTurnSize, TB::EndTurnSize));
+		// ⚠️ DrawAs 必须是 Image 而不是默认的 Box。
+		//    Box 走九宫格拉伸，而这张印章【不是九宫格资产】
+		//    （边缘是造型的一部分），按 Box 画会把角上的尖端糊掉。
+		B.DrawAs = ESlateBrushDrawType::Image;
+		B.TintColor = FSlateColor(Tint);
+		return B;
+	};
+
+	Style.SetNormal(MakeBrush(TB::ColEndTurnOn));
+	Style.SetHovered(MakeBrush(TB::ColEndTurnHover));
+	Style.SetPressed(MakeBrush(TB::ColEndTurnPress));
+	Style.SetDisabled(MakeBrush(TB::ColEndTurnOff));
+
+	// ⚠️ 内边距清零。引擎默认样式带 NormalPadding/PressedPadding，
+	//    留着会让 104px 的槽位里只剩一小块画图，印章被缩小并偏移；
+	//    而 PressedPadding 与 NormalPadding 不等还会让按下时整张图跳一下。
+	Style.SetNormalPadding(FMargin(0.0f));
+	Style.SetPressedPadding(FMargin(0.0f));
+
+	EndTurnButton->SetStyle(Style);
+}
+
+UImage* UHexHandPanelWidget::GetOrCreateEnergyPip(int32 Index)
+{
+	if (EnergyPips.IsValidIndex(Index) && EnergyPips[Index])
+	{
+		return EnergyPips[Index];
+	}
+
+	if (!EnergyRow)
+	{
+		return nullptr;
+	}
+
+	UImage* Pip = WidgetTree->ConstructWidget<UImage>(UImage::StaticClass());
+	if (!Pip)
+	{
+		return nullptr;
+	}
+
+	if (UTexture2D* Tex = LoadObject<UTexture2D>(nullptr, TB::EnergyPipPath))
+	{
+		Pip->SetBrushFromTexture(Tex, false);
+		// ⚠️ 按贴图原比例给尺寸（1154x1000 → 34x30），不能写成正方形：
+		//    火苗整图偏宽（左右各有一簇小火苗），压成方形会把它挤扁。
+		Pip->SetDesiredSizeOverride(
+			FVector2D(TB::EnergyPipWidth, TB::EnergyPipHeight));
+	}
+	else
+	{
+		UE_LOG(LogHexSpire, Warning,
+			TEXT("体力火苗贴图加载失败：%s"), TB::EnergyPipPath);
+	}
+
+	// ⚠️ 必须插在 EnergyCount【之前】—— 火苗在左、读数在右。
+	//    直接 AddChild 会把火苗追加到读数右边，于是变成 "2/5 🔥🔥"，
+	//    而且每多一点体力读数就往左跳一格。
+	const int32 InsertAt = EnergyCount
+		? EnergyRow->GetChildIndex(EnergyCount) : EnergyRow->GetChildrenCount();
+	EnergyRow->InsertChildAt(FMath::Max(0, InsertAt), Pip);
+
+	if (UHorizontalBoxSlot* S = Cast<UHorizontalBoxSlot>(Pip->Slot))
+	{
+		S->SetVerticalAlignment(VAlign_Center);
+		S->SetPadding(TB::EnergyPipPad);
+	}
+
+	EnergyPips.SetNum(FMath::Max(EnergyPips.Num(), Index + 1));
+	EnergyPips[Index] = Pip;
+	return Pip;
+}
+
 void UHexHandPanelWidget::NativePreConstruct()
 {
 	Super::NativePreConstruct();
@@ -310,6 +506,41 @@ void UHexHandPanelWidget::NativePreConstruct()
 	// 顶栏在设计器里也要所见即所得：不摆头像/字样的话，
 	// 美术调位置时四张图全是 Collapsed，只能盲摆。
 	ApplyHeroArt();
+
+	// 按钮样式也要在设计器里生效 —— 蓝图资产里存的是引擎默认的灰方块，
+	// 不套一次样式的话美术看到的是灰方块而不是印章，会以为贴图没配上。
+	ApplyEndTurnStyle();
+
+	// 体力火苗同理：运行时才按体力上限建，设计器里 EnergyRow 是空的，
+	// 在里面调间距/调火苗与按钮的相对位置全都看不到效果。
+	if (EnergyRow)
+	{
+		// 每次改属性都会重跑 PreConstruct，先清掉上一批，否则越堆越多。
+		//
+		// ⚠️ 【不能】用 EnergyRow->ClearChildren()。EnergyCount 是蓝图里
+		//    摆在这个容器内的控件（BindWidget 绑过来的），ClearChildren
+		//    会把它一起删掉 —— 表现是"设计器里体力读数凭空消失"，
+		//    而且一改预览数量就消失一次，看起来像绑定坏了。
+		//    只移除【本函数上一轮自己建的】那些火苗。
+		for (UImage* Old : EnergyPips)
+		{
+			if (Old)
+			{
+				EnergyRow->RemoveChild(Old);
+			}
+		}
+		EnergyPips.Reset();
+
+		for (int32 I = 0; I < DesignPreviewEnergy; ++I)
+		{
+			if (UImage* Pip = GetOrCreateEnergyPip(I))
+			{
+				// 预览里让后两个是"已用掉"的状态，好看出染色对比够不够
+				Pip->SetColorAndOpacity(I < DesignPreviewEnergy - 2
+					? TB::ColEnergyPipOn : TB::ColEnergyPipOff);
+			}
+		}
+	}
 
 	if (!HandBox)
 	{
@@ -758,6 +989,67 @@ FText UHexHandPanelWidget::GetStatusText() const
 	return FText::GetEmpty();
 }
 
+FText UHexHandPanelWidget::GetEnergyCountText() const
+{
+	if (AHexDemoGameMode* Mode = GetMode())
+	{
+		if (Mode->IsInBattle())
+		{
+			if (const FHexBattleState* BS = Mode->GetBattleState())
+			{
+				// 火苗已经把"有几点"画出来了，这里只补数字 ——
+				// 上限一多（符文加体力）时数火苗会数错，数字是兜底。
+				return FText::FromString(FString::Printf(TEXT("%d/%d"),
+					BS->Energy, FHexRuleBook::EnergyMax(*BS)));
+			}
+		}
+		return FText::GetEmpty();
+	}
+	// 设计器预览：没有 GameMode，给一个看得见的占位
+	return FText::FromString(TEXT("3/5"));
+}
+
+bool UHexHandPanelWidget::CanEndTurn() const
+{
+	AHexDemoGameMode* Mode = GetMode();
+
+	// ⚠️ 设计器里没有 GameMode。返回 true 让按钮以【可按】的样子显示 ——
+	//    返回 false 的话美术看到的是 Disabled 那套染色（压暗到 0.45），
+	//    会以为贴图导得太暗。
+	if (!Mode)
+	{
+		return true;
+	}
+
+	// ⚠️ 与 AHexDemoPlayerController::OnEndTurn 的判断【必须一致】。
+	//    两边各写一套的话会出现"按钮亮着但点了没反应"，
+	//    或者反过来"空格能用、按钮却是灰的"—— 两种都不报错。
+	return Mode->IsInBattle() && !Mode->IsBattleOver();
+}
+
+void UHexHandPanelWidget::OnEndTurnClicked()
+{
+	AHexDemoGameMode* Mode = GetMode();
+	if (!Mode)
+	{
+		return;
+	}
+
+	// ⚠️ 这里【必须】再判一次，不能只靠按钮的 SetIsEnabled。
+	//    Slate 的点击与我们每帧的刷新之间存在一帧的窗口：
+	//    最后一张牌打完导致战斗结束的那一帧，按钮还是 enabled 的。
+	//    那一帧点下去会在 BattleOver 之后再走一次 EndPlayerTurn。
+	if (!CanEndTurn())
+	{
+		return;
+	}
+
+	// 走 GameMode 而不是自己改状态 —— 纪律 3：表现层只发送输入。
+	// 与空格键（PlayerController::OnEndTurn）汇到同一个入口，
+	// 所以"点按钮"和"按空格"不可能出现行为差异。
+	Mode->EndTurn();
+}
+
 // ── 角色 UI 资产
 
 const TB::FHeroUIArt& UHexHandPanelWidget::ResolveHeroArt() const
@@ -917,8 +1209,23 @@ void UHexHandPanelWidget::RefreshTopBar(AHexDemoGameMode* Mode)
 	};
 
 	SetBattleRow(RoundNum,   GetRoundText());
-	SetBattleRow(EnergyText, GetEnergyText());
 	SetBattleRow(PileInfo,   GetPileText());
+
+	// ── 顶栏的体力那一行已被右下角的火苗取代
+	//
+	// ⚠️ 折叠而不是删控件：GetEnergyText() 与 EnergyText 控件都留着，
+	//    因为"◆◇ 文字版"是 UI_Asset_Checklist.md 里明确写的
+	//    【等美术出图之前的占位】—— 现在图出了（UI_体力槽），
+	//    占位就该收起来，否则同一个读数在屏幕上出现两次，
+	//    玩家不知道该看哪个，而两处若不同步（比如只改了一边的算法）
+	//    看起来就像有个 bug。
+	//
+	// ⚠️ 不删是为了留退路：想回到文字版只要把这里改回 SetBattleRow。
+	//    删掉控件的话蓝图里那一项也要跟着删，来回折腾。
+	if (EnergyText)
+	{
+		EnergyText->SetVisibility(ESlateVisibility::Collapsed);
+	}
 
 	if (StatusText)
 	{
@@ -927,6 +1234,100 @@ void UHexHandPanelWidget::RefreshTopBar(AHexDemoGameMode* Mode)
 		// 空消息时收掉，免得留一块空白抢视觉
 		StatusText->SetVisibility(Msg.IsEmpty()
 			? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
+	}
+}
+
+void UHexHandPanelWidget::RefreshActionArea(AHexDemoGameMode* Mode)
+{
+	const bool bBattle = Mode && Mode->IsInBattle();
+
+	// ── 整块显隐：地图界面没有回合可结束，也没有体力
+	//
+	// ⚠️ 折叠【整块】而不是逐个折叠子控件：VerticalBox 里
+	//    全部子项 Collapsed 后容器本身仍然占位（一个 0 尺寸的空盒），
+	//    这本身无害，但 ActionCol 上要是以后加了背景就会留下一块空板。
+	if (ActionCol)
+	{
+		ActionCol->SetVisibility(bBattle
+			? ESlateVisibility::SelfHitTestInvisible
+			: ESlateVisibility::Collapsed);
+	}
+
+	// ── 点击接线
+	//
+	// ⚠️ 必须在下面那个 `if (!bBattle) return;` 【之前】，
+	//    而且不能跟着战斗状态走。接线是【一次性的线路】而不是外观：
+	//    放在战斗分支里的话，从地图进战斗的第一帧顺序若反过来
+	//    （自检先跑），就会报"点击未接线"—— 那是假警报。
+	//    更实际的理由是：接线与"现在能不能按"是两件事，
+	//    后者由 SetIsEnabled 表达，混在一起会让"按钮点不动"
+	//    同时有两个可能原因，排查要多绕一圈。
+	if (EndTurnButton)
+	{
+		// ⚠️ 绑定放在刷新里（每帧查一次）而不是构造函数里：
+		//    蓝图路径下按钮是【被 BindWidget 绑过来的】，
+		//    构造函数跑的时候 EndTurnButton 还是 nullptr ——
+		//    在那里绑等于永远不绑，而且不报错：按钮显示正常、点了没反应。
+		//
+		// ⚠️ 用 IsAlreadyBound 挡住重复绑定。OnClicked 是【多播】委托，
+		//    每帧 AddDynamic 会堆出成千上万份，一次点击调用几千次
+		//    EndTurn —— 表现是"点一下直接跳过好几个回合"。
+		if (!EndTurnButton->OnClicked.IsAlreadyBound(
+			this, &UHexHandPanelWidget::OnEndTurnClicked))
+		{
+			EndTurnButton->OnClicked.AddDynamic(
+				this, &UHexHandPanelWidget::OnEndTurnClicked);
+		}
+
+		// 战斗结束后（胜/负）转 Disabled 那套染色 ——
+		// 那时该按的是 Enter 结算，不是结束回合。
+		EndTurnButton->SetIsEnabled(CanEndTurn());
+	}
+
+	if (!bBattle)
+	{
+		return;
+	}
+
+	// ── 体力火苗
+	if (EnergyRow)
+	{
+		const FHexBattleState* BS = Mode->GetBattleState();
+		const int32 Max = BS ? FHexRuleBook::EnergyMax(*BS) : 0;
+		const int32 Cur = BS ? BS->Energy : 0;
+
+		for (int32 I = 0; I < Max; ++I)
+		{
+			UImage* Pip = GetOrCreateEnergyPip(I);
+			if (!Pip)
+			{
+				continue;
+			}
+
+			Pip->SetVisibility(ESlateVisibility::HitTestInvisible);
+
+			// ⚠️ 用【同一张贴图染色】区分已用/未用，不是换贴图 ——
+			//    目前美术只给了一张火苗图，没有空态图。
+			//    Alpha 压到 0.28 而不是整个隐藏：保留火苗轮廓，
+			//    让"体力上限是几"仍然一眼可数（§13.2 的要求）。
+			//    隐藏掉的话玩家只能看到剩余量，看不出上限。
+			Pip->SetColorAndOpacity(I < Cur
+				? TB::ColEnergyPipOn : TB::ColEnergyPipOff);
+		}
+
+		// 上限变小时（比如卸掉加体力的符文）把多出来的折叠掉
+		for (int32 I = Max; I < EnergyPips.Num(); ++I)
+		{
+			if (EnergyPips[I])
+			{
+				EnergyPips[I]->SetVisibility(ESlateVisibility::Collapsed);
+			}
+		}
+	}
+
+	if (EnergyCount)
+	{
+		EnergyCount->SetText(GetEnergyCountText());
 	}
 }
 
@@ -965,6 +1366,12 @@ void UHexHandPanelWidget::RefreshFromGameMode(AHexDemoGameMode* Mode)
 	//    本次改动最可能的回归（顶栏原先跟着整块控件一起折叠）。
 	//    只在战斗中自检的话，这个回归永远测不出来。
 	LogTopBarCheckOnce(bBattle);
+
+	// ⚠️ 右下角操作区也必须在下面那些 return 【之前】刷。
+	//    它自己会在非战斗时整块折叠，但那个折叠得真的被执行到 ——
+	//    放在 return 之后的话，从战斗回到地图时这块会带着
+	//    上一场战斗的体力数留在屏幕上（而且不报错）。
+	RefreshActionArea(Mode);
 
 	// ⚠️ HandBox / FixedBox 只要求【至少有一个】存在。
 	//    以前这里是 && 全都要有，改成 WBP 可绑定后那会让"只摆了手牌区、
@@ -1159,6 +1566,12 @@ TArray<FString> UHexHandPanelWidget::GetUnboundTopBarNames() const
 	Check(EnergyText,        TB::N::EnergyText);
 	Check(PileInfo,          TB::N::PileInfo);
 	Check(StatusText,        TB::N::StatusText);
+
+	// 右下角操作区一并查 —— 它与顶栏同一类失败模式（名字对不上就永远空）
+	Check(ActionCol,         TB::N::ActionCol);
+	Check(EndTurnButton,     TB::N::EndTurnButton);
+	Check(EnergyRow,         TB::N::EnergyRow);
+	Check(EnergyCount,       TB::N::EnergyCount);
 
 	return Missing;
 }
@@ -1501,5 +1914,215 @@ void UHexHandPanelWidget::LogTopBarCheckOnce(bool bInBattle)
 			TEXT("[自检] StatusText 未绑定 —— 状态提示将【完全不显示】。"
 				 "它是 GetStatusMessage() 唯一的显示点"
 				 "（原先画在已删除的 DrawTopBar 里）"));
+	}
+
+	// ══════════════════════════════════════════════════════════════
+	// 右下角操作区自检
+	// ══════════════════════════════════════════════════════════════
+	// ⚠️ 与顶栏同一类失败模式，而且多了两个【只有右下角才有】的坑：
+	//      · AutoSize 没开 → Slate 拿 Offset 当尺寸用，
+	//        104px 的按钮被挤成 20px（不报错，只是"按钮好像没出来"）
+	//      · 按钮建成了 UImage → 图正常显示但收不到点击
+	//    所以这里查的是【渲染尺寸】而不只是控件是否存在。
+	UE_LOG(LogHexSpire, Display, TEXT("[自检] 右下角操作区自检"));
+
+	UTexture2D* EndTurnTex = LoadObject<UTexture2D>(nullptr, TB::EndTurnPath);
+	UTexture2D* PipTex     = LoadObject<UTexture2D>(nullptr, TB::EnergyPipPath);
+
+	UE_LOG(LogHexSpire, Display,
+		TEXT("[自检]   贴图：结束回合=%s 体力火苗=%s"),
+		EndTurnTex ? TEXT("有") : TEXT("【缺】"),
+		PipTex     ? TEXT("有") : TEXT("【缺】"));
+
+	if (!EndTurnTex)
+	{
+		UE_LOG(LogHexSpire, Error,
+			TEXT("[自检] 结束回合贴图加载失败：%s —— 检查资产名"
+				 "（注意它带 _3 后缀）。按钮会回退成引擎默认灰方块"),
+			TB::EndTurnPath);
+	}
+	if (!PipTex)
+	{
+		UE_LOG(LogHexSpire, Error,
+			TEXT("[自检] 体力火苗贴图加载失败：%s —— 检查资产名"),
+			TB::EnergyPipPath);
+	}
+
+	// ⚠️ 尺寸检查【只在战斗中】做。这一块在地图界面是【故意折叠】的
+	//    （地图上没有回合可结束），而折叠控件的 CachedGeometry 就是全零 ——
+	//    不分战斗状态地报错等于每次进地图都喊一次狼来了，
+	//    而假警报会训练人忽略整条自检，比没有自检更糟。
+	//    顶栏那边不需要这个判断，因为顶栏在两个界面都显示。
+	if (ActionCol && bInBattle)
+	{
+		const FVector2D Size = ActionCol->GetCachedGeometry().GetLocalSize();
+		if (Size.IsNearlyZero())
+		{
+			UE_LOG(LogHexSpire, Error,
+				TEXT("[自检] 右下角操作区渲染尺寸为 0 —— 控件建了但没画出来。"
+					 "检查 ActionCol 的 CanvasPanelSlot 是否开了 AutoSize"
+					 "（不开的话 Offset 的 Right/Bottom 会被当成尺寸用）"));
+		}
+		else
+		{
+			// 按钮 104 + 火苗一行 ~30 + 间距 → 高度应在 130 上下。
+			// 明显小于按钮边长就说明尺寸被挤掉了。
+			UE_LOG(LogHexSpire, Display,
+				TEXT("[自检]   操作区渲染尺寸 %.0fx%.0f（按钮边长常量 %.0f）"),
+				Size.X, Size.Y, TB::EndTurnSize);
+
+			if (Size.X < TB::EndTurnSize - 1.0f)
+			{
+				UE_LOG(LogHexSpire, Warning,
+					TEXT("[自检] 操作区宽度 %.0f 小于按钮边长 %.0f —— "
+						 "按钮很可能被槽位挤小了，检查 AutoSize 与 SizeBox"),
+					Size.X, TB::EndTurnSize);
+			}
+		}
+	}
+
+	// ⚠️ 专门查类型：蓝图里把按钮摆成 UImage 是很自然的手误
+	//    （它就是一张图）。那样 BindWidgetOptional 按名字匹配会失败
+	//    （类型不符 → 绑定为空），于是 EndTurnButton 是 nullptr——
+	//    图在屏幕上、点了没反应、一行不报错。
+	if (!EndTurnButton)
+	{
+		UE_LOG(LogHexSpire, Warning,
+			TEXT("[自检] EndTurnButton 未绑定 —— 结束回合按钮【点不动】"
+				 "（空格键仍可用）。蓝图里这个控件必须是 Button 类型，"
+				 "摆成 Image 的话图能显示但收不到点击"));
+	}
+	else
+	{
+		// "可按" 在地图界面本就是否（没有回合可结束），所以顺带打出
+		// 当前是否在战斗 —— 否则读日志的人会把正常状态当成 bug。
+		UE_LOG(LogHexSpire, Display,
+			TEXT("[自检]   结束回合按钮：类型=%s 点击已接线=%s 可按=%s（当前%s战斗中）"),
+			*EndTurnButton->GetClass()->GetName(),
+			EndTurnButton->OnClicked.IsBound() ? TEXT("是") : TEXT("【否】"),
+			CanEndTurn() ? TEXT("是") : TEXT("否"),
+			bInBattle ? TEXT("在") : TEXT("不在"));
+
+		// ⚠️ 这条与"可按"分开报，而且只在战斗中才算异常：
+		//    接线断了的表现是"按钮在那儿、点了没反应"，
+		//    而那与"按钮此刻被禁用"在画面上完全一样。
+		if (!EndTurnButton->OnClicked.IsBound())
+		{
+			UE_LOG(LogHexSpire, Warning,
+				TEXT("[自检] 结束回合按钮的点击【未接线】—— 点了不会有反应"
+					 "（空格键仍可用）。检查 RefreshActionArea 里的 AddDynamic"));
+		}
+	}
+
+	// 火苗个数在地图界面是 0（整块折叠，不建火苗），那是正常的。
+	UE_LOG(LogHexSpire, Display,
+		TEXT("[自检]   体力火苗已建 %d 个%s"), EnergyPips.Num(),
+		bInBattle ? TEXT("") : TEXT("（不在战斗中，这块整块折叠）"));
+
+	// ══════════════════════════════════════════════════════════════
+	// 先花掉一点体力（只在 -HexAutoRoom 下）
+	// ══════════════════════════════════════════════════════════════
+	// ⚠️ 不打一张牌的话体力恒是满的，于是下面那条亮暗检查【永远全亮】——
+	//    "染色没生效"和"此刻体力真的是满的"在日志里完全一样，
+	//    等于这条自检测不到它要测的东西。
+	//    打一张牌之后才有"亮几个暗几个"可对照。
+	if (bInBattle && FParse::Param(FCommandLine::Get(), TEXT("HexAutoRoom")))
+	{
+		if (AHexDemoGameMode* Mode = GetMode())
+		{
+			const int32 Uid = Mode->GetSelectedCardUid();
+			const TArray<FIntVector>& Targets = Mode->GetLegalTargets();
+
+			// 自检开关已经替我们选好了第一张手牌（见 StartPlay）。
+			// 没有合法目标时跳过 —— 那是卡本身的问题，不在本条自检范围内。
+			if (Uid != 0 && Targets.Num() > 0)
+			{
+				Mode->PlayCard(Uid, Targets[0]);
+
+				// ⚠️ 打完牌要重刷一次，否则火苗还是上一帧的染色 ——
+				//    自检是在 RefreshActionArea 之后跑的，
+				//    这里改了逻辑状态就得把表现同步过来再读。
+				RefreshActionArea(Mode);
+			}
+		}
+	}
+
+	// ── 火苗的亮/暗是否真的跟着体力走
+	//
+	// ⚠️ 只报个数不够：已用/未用是靠【同一张贴图染不同色】区分的
+	//    （没有空态贴图），而"染色没生效"的表现是五个火苗一样亮 ——
+	//    玩家看不出还剩几点体力，而这不报错。
+	//    所以把每个火苗的实际 Alpha 打出来，和当前体力对照。
+	if (bInBattle && EnergyPips.Num() > 0)
+	{
+		const AHexDemoGameMode* Mode = GetMode();
+		const FHexBattleState* BS = Mode ? Mode->GetBattleState() : nullptr;
+
+		FString Pattern;
+		for (const UImage* Pip : EnergyPips)
+		{
+			if (!Pip)
+			{
+				Pattern += TEXT("?");
+				continue;
+			}
+			// 亮 = 未消耗，暗 = 已消耗
+			Pattern += (Pip->GetColorAndOpacity().A > 0.5f)
+				? TEXT("亮") : TEXT("暗");
+		}
+
+		UE_LOG(LogHexSpire, Display,
+			TEXT("[自检]   火苗亮暗 [%s]（当前体力 %d/%d —— 亮的个数应等于当前体力）"),
+			*Pattern, BS ? BS->Energy : -1,
+			BS ? FHexRuleBook::EnergyMax(*BS) : -1);
+	}
+
+	// ══════════════════════════════════════════════════════════════
+	// 真的点一下（只在 -HexAutoRoom 下）
+	// ══════════════════════════════════════════════════════════════
+	// ⚠️ 上面那条 "点击已接线=是" 只证明委托【非空】，不证明它接到了
+	//    正确的函数上。绑错对象、绑到别的 UFUNCTION、或者
+	//    OnEndTurnClicked 里被某个判空提前 return —— 三种情况下
+	//    IsBound() 都是 true，而按钮点了没反应。
+	//
+	// ⚠️ 只在自检开关下做，因为它【真的会结束一个回合】。
+	//    没有这个开关的话，玩家每局第三帧会被白扣一个回合。
+	//    判据用回合数而不是"函数有没有被调用"：后者可以被
+	//    一个提前 return 骗过去，回合数变了才说明逻辑层真的动了。
+	if (bInBattle && EndTurnButton
+		&& FParse::Param(FCommandLine::Get(), TEXT("HexAutoRoom")))
+	{
+		AHexDemoGameMode* Mode = GetMode();
+		const FHexBattleState* BS = Mode ? Mode->GetBattleState() : nullptr;
+
+		if (BS)
+		{
+			// ⚠️ 是 RoundNumber 而不是 Round —— FHexBattleState 上没有
+			//    Round 字段（那个在 FHexRuleViolation 上）。名字相近，
+			//    拿错的话编译就报错，不至于静默，但别在这里绕弯。
+			const int32 Before = BS->RoundNumber;
+
+			// 走 Slate 的广播而不是直接调 OnEndTurnClicked() ——
+			// 直接调会跳过"委托到底连到谁"这一段，那正是要验的东西。
+			EndTurnButton->OnClicked.Broadcast();
+
+			const int32 After = Mode->GetBattleState()
+				? Mode->GetBattleState()->RoundNumber : Before;
+
+			if (After != Before)
+			{
+				UE_LOG(LogHexSpire, Display,
+					TEXT("[自检]   模拟点击生效：回合 %d → %d"), Before, After);
+			}
+			else
+			{
+				// 战斗当场结束（最后一击）时回合数不变是合法的，
+				// 所以把结束状态一起打出来，免得被当成接线坏了。
+				UE_LOG(LogHexSpire, Warning,
+					TEXT("[自检] 模拟点击后回合数没变（仍 %d，战斗已结束=%s）"
+						 "—— 若战斗未结束则说明点击没有真正走到 EndTurn"),
+					Before, Mode->IsBattleOver() ? TEXT("是") : TEXT("否"));
+			}
+		}
 	}
 }

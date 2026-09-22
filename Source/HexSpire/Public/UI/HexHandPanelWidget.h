@@ -62,6 +62,7 @@ class UCanvasPanel;
 class UTextBlock;
 class UImage;
 class UProgressBar;
+class UButton;
 class UTexture2D;
 class UWidget;
 
@@ -201,6 +202,32 @@ public:
 	UFUNCTION(BlueprintPure, Category = "顶栏|文字")
 	FText GetStatusText() const;
 
+	/** 体力读数（"2/5"）。不在战斗中返回空。 */
+	UFUNCTION(BlueprintPure, Category = "操作区|文字")
+	FText GetEnergyCountText() const;
+
+	/**
+	 * 现在能不能结束回合。
+	 *
+	 * ⚠️ 与 PlayerController::OnEndTurn 的判断【必须一致】
+	 *    （在战斗中 && 战斗未结束）。两边各写一套的话会出现
+	 *    "按钮是亮的但点了没反应"，或者反过来"空格能用按钮却是灰的"。
+	 */
+	UFUNCTION(BlueprintPure, Category = "操作区|状态")
+	bool CanEndTurn() const;
+
+	/**
+	 * 点击结束回合。
+	 *
+	 * ⚠️ 走 GameMode::EndTurn 而不是自己改状态 —— 纪律 3：
+	 *    表现层只发送输入，不驱动逻辑。
+	 *
+	 * ⚠️ 必须是 UFUNCTION：UButton::OnClicked 是【动态】委托，
+	 *    只能绑 UFUNCTION 标记过的函数。绑普通成员函数编译期就报错。
+	 */
+	UFUNCTION()
+	void OnEndTurnClicked();
+
 	/** HP 比例 0..1，供 ProgressBar 的 Percent 绑定 */
 	UFUNCTION(BlueprintPure, Category = "顶栏|状态")
 	float GetHeroHPPercent() const;
@@ -261,6 +288,20 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "预览",
 		meta = (ClampMin = "0", ClampMax = "3"))
 	int32 DesignPreviewHeroIndex = 0;
+
+	/**
+	 * 设计器里预览几个体力火苗。
+	 *
+	 * ⚠️ 与 DesignPreviewCardCount 同一个理由：火苗是运行时按体力上限
+	 *    建出来的，所以设计器里 EnergyRow 永远是空的 —— 在里面调间距、
+	 *    调火苗与按钮的相对位置全都看不到效果，只能盲摆。
+	 *
+	 * ⚠️ 只在设计器生效。运行时个数由 FHexRuleBook::EnergyMax 决定
+	 *    （受符文/装备影响，不是恒为 5）。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "预览",
+		meta = (ClampMin = "0", ClampMax = "10"))
+	int32 DesignPreviewEnergy = 5;
 
 protected:
 	virtual TSharedRef<SWidget> RebuildWidget() override;
@@ -349,6 +390,41 @@ protected:
 	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
 	UTextBlock* StatusText = nullptr;
 
+	// ── 右下角操作区（结束回合按钮 + 体力火苗）
+	//
+	// ⚠️ 同样全部 Optional：美术把按钮删掉（比如只留空格键结束回合）
+	//    是合法的，此时指针为 nullptr，那一项不显示但不崩。
+	//    所以下面每处使用都要逐个判空，不能"判一个当全有"。
+
+	/** 右下角竖排容器。整块显隐用它。 */
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UWidget* ActionCol = nullptr;
+
+	/**
+	 * 结束回合按钮。
+	 *
+	 * ⚠️ 必须是 UButton 而不是 UImage。UImage 收不到点击
+	 *    （它没有 OnClicked，也不参与按钮的三态），拿它当按钮的表现是
+	 *    "图显示正常、点了没反应"—— 而且不报错，
+	 *    很容易误判成 GameMode::EndTurn 那边的问题。
+	 */
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UButton* EndTurnButton = nullptr;
+
+	/**
+	 * 体力火苗的横排容器。
+	 *
+	 * ⚠️ 火苗是【运行时按体力上限增删】的，蓝图里这个容器是空的 ——
+	 *    与 HandBox 同一个情况。所以设计器里靠 DesignPreviewEnergy
+	 *    摆几个占位火苗，否则调位置只能盲摆。
+	 */
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UHorizontalBox* EnergyRow = nullptr;
+
+	/** 体力读数（"2/5"），跟在火苗右边 */
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UTextBlock* EnergyCount = nullptr;
+
 
 private:
 	/**
@@ -374,6 +450,36 @@ private:
 
 	/** 把池里多出来的控件折叠掉（不销毁，留着复用） */
 	static void HideExtra(TArray<UHexCardWidget*>& Pool, int32 UsedCount);
+
+	/**
+	 * 按当前状态刷新右下角操作区（体力火苗 + 结束回合按钮）。
+	 *
+	 * ⚠️ 必须在"非战斗就折叠卡牌"那段【之前】调用。
+	 *    它自己会在非战斗时整块折叠（地图上没有回合可结束），
+	 *    但那个折叠得真的被执行到 —— 放在 return 之后的话，
+	 *    从战斗回到地图时这块会带着上一场的体力数留在屏幕上。
+	 */
+	void RefreshActionArea(AHexDemoGameMode* Mode);
+
+	/**
+	 * 取或建第 Index 个体力火苗。
+	 *
+	 * ⚠️ 与卡牌控件同一套池化复用：体力每回合都在变，
+	 *    每帧重建 UImage 会产生大量 UObject 垃圾。
+	 */
+	UImage* GetOrCreateEnergyPip(int32 Index);
+
+	/** C++ 默认树里搭右下角操作区（没建蓝图时才走） */
+	void BuildActionAreaDefaultTree(UCanvasPanel* Canvas);
+
+	/**
+	 * 给结束回合按钮套上贴图样式。
+	 *
+	 * ⚠️ 三态用【同一张贴图】只改染色 —— 目前美术只给了一张图。
+	 *    不给 Hovered/Pressed 赋值的话那两态会回退到引擎默认的
+	 *    灰色圆角方块，表现是"鼠标一移上去印章变成灰方块"。
+	 */
+	void ApplyEndTurnStyle();
 
 	/**
 	 * 按当前状态刷新顶栏。
@@ -433,6 +539,9 @@ private:
 
 	/** 固定卡控件池 */
 	UPROPERTY(Transient) TArray<UHexCardWidget*> FixedCards;
+
+	/** 体力火苗控件池（同卡牌：折叠复用而不是销毁重建） */
+	UPROPERTY(Transient) TArray<UImage*> EnergyPips;
 
 	/** ResolveCardClass 的缓存结果 */
 	UPROPERTY(Transient) UClass* ResolvedCardClass = nullptr;

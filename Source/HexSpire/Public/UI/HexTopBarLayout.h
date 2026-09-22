@@ -89,6 +89,40 @@ namespace HexTopBarLayout
 		 *    却得不到任何解释，而代码一行不报错。
 		 */
 		inline const TCHAR* StatusText = TEXT("StatusText");
+
+		// ══════════════════════════════════════════════════════════
+		// 右下角操作区（结束回合按钮 + 体力火苗）
+		// ══════════════════════════════════════════════════════════
+		// ⚠️ 这一块【不在顶栏容器里】，它锚右下角。放在同一个文件里是
+		//    因为它与顶栏共享 ColText/字体那套常量，而且和顶栏一样
+		//    有"运行时树 + 生成器"两条消费路径 —— 分两个文件的话
+		//    两处会各自漂移。
+
+		/** 右下角竖排容器：体力排在上，结束回合按钮在下 */
+		inline const TCHAR* ActionCol    = TEXT("ActionCol");
+
+		/**
+		 * 结束回合按钮。
+		 *
+		 * ⚠️ 必须是 UButton 而不是 UImage。
+		 *    UImage 收不到点击（它不是可聚焦控件，也没有 OnClicked），
+		 *    拿 UImage 当按钮的表现是"图显示正常、点了没反应"——
+		 *    而且不报错，很容易误判成逻辑层的问题。
+		 */
+		inline const TCHAR* EndTurnButton = TEXT("EndTurnButton");
+
+		/**
+		 * 体力火苗的横排容器。
+		 *
+		 * ⚠️ 火苗【个数由体力上限决定】，所以是运行时增删的 ——
+		 *    与手牌同一个道理，不能在蓝图里摆死 5 个。
+		 *    EnergyMax 受符文/装备影响（见 FHexRuleBook::EnergyMax），
+		 *    摆死的话加了 +1 体力的符文后第 6 点永远看不见。
+		 */
+		inline const TCHAR* EnergyRow    = TEXT("EnergyRow");
+
+		/** 体力读数（"2/5"），跟在火苗右边 */
+		inline const TCHAR* EnergyCount  = TEXT("EnergyCount");
 	}
 
 	// ══════════════════════════════════════════════════════════════
@@ -171,6 +205,89 @@ namespace HexTopBarLayout
 	/** HP 条的槽底与填充 */
 	inline const FLinearColor ColHPTrack = FLinearColor(0.15f, 0.05f, 0.05f, 0.90f);
 	inline const FLinearColor ColHPFill  = FLinearColor(0.25f, 0.85f, 0.35f, 0.95f);
+
+	// ══════════════════════════════════════════════════════════════
+	// 右下角操作区
+	// ══════════════════════════════════════════════════════════════
+	// 摆在右下角的理由：手牌横排锚在【底边中点】，固定卡锚在【左侧】,
+	// 图例在右侧垂直居中（见 AHexDemoHUD::DrawLegend）。右下角是
+	// 底部唯一没被占用的位置，而"结束回合"必须离手牌近 ——
+	// 出完牌后的下一个动作就是它。
+
+	/**
+	 * 结束回合按钮的边长。
+	 *
+	 * ⚠️ 按钮贴图 UI_结束回合_3 实测 1266x1243（比例 1.019），
+	 *    去掉透明边后内容区 1219x1161（比例 1.050）—— 近正方形，
+	 *    所以按正方形槽位画不会变形，不需要像字样那样套 ScaleBox。
+	 *
+	 * ⚠️ 不要按"比例 1.0"写死成圆形去裁：那张图的外框是六边形带角的
+	 *    印章造型，上下留白比左右多（实测上 2.3% / 下 4.3%），
+	 *    裁掉会切到角。整张原图画进正方形槽位即可。
+	 */
+	inline constexpr float EndTurnSize = 104.0f;
+
+	/**
+	 * 单个体力火苗的尺寸。
+	 *
+	 * ⚠️ 按贴图原比例定，不能写成正方形。
+	 *    UI_体力槽 实测 1402x1122，去透明边后内容区 1154x1000
+	 *    （比例 1.154）—— 火苗是【竖向】的形状，但整图偏宽，
+	 *    因为左右两侧各有一簇小火苗。写成正方形会把它压扁。
+	 */
+	inline constexpr float EnergyPipWidth  = 34.0f;
+	inline constexpr float EnergyPipHeight = 30.0f;
+
+	/** 火苗之间的间距。留窄一点，让一排火苗读起来是"一组"而不是散点。 */
+	inline const FMargin EnergyPipPad = FMargin(1.0f, 0.0f, 1.0f, 0.0f);
+
+	/** 体力读数与火苗之间 */
+	inline const FMargin EnergyCountPad = FMargin(6.0f, 0.0f, 0.0f, 0.0f);
+
+	/** 体力排与按钮之间 */
+	inline const FMargin EnergyRowPad = FMargin(0.0f, 0.0f, 0.0f, 4.0f);
+
+	/**
+	 * 操作区相对屏幕右下角的内缩。
+	 *
+	 * ⚠️ 右边距要比 DrawLegend 的 12px 大一些不是为了美观 ——
+	 *    图例锚的是【垂直居中】，操作区锚的是【底部】，两者不会
+	 *    在同一高度上撞。这里的 20px 只是让按钮别贴死屏幕边缘
+	 *    （贴边的按钮在 overscan 的显示器上会被切掉一条）。
+	 */
+	inline const FMargin ActionPad = FMargin(0.0f, 0.0f, 20.0f, 20.0f);
+
+	/**
+	 * 体力耗尽时火苗的染色。
+	 *
+	 * ⚠️ 用【同一张贴图染成暗色】而不是换一张"空槽"贴图：
+	 *    目前只有一张火苗图，没有空态图。硬要用两张的话得先等美术出图，
+	 *    而在那之前"已用掉的体力"就完全看不出来 —— 那比染色难看得多。
+	 *    Alpha 压到 0.28 而不是纯灰：保留火苗形状，让"有几格体力上限"
+	 *    仍然一眼可数（这是 §13.2 要求的）。
+	 */
+	inline const FLinearColor ColEnergyPipOn  = FLinearColor(1.00f, 1.00f, 1.00f, 1.00f);
+	inline const FLinearColor ColEnergyPipOff = FLinearColor(0.34f, 0.38f, 0.46f, 0.28f);
+
+	/** 结束回合按钮在不可按时（非战斗/战斗已结束）的染色 */
+	inline const FLinearColor ColEndTurnOn  = FLinearColor(1.00f, 1.00f, 1.00f, 1.00f);
+	inline const FLinearColor ColEndTurnOff = FLinearColor(0.55f, 0.55f, 0.58f, 0.45f);
+
+	/** 悬停时轻微提亮 —— 按钮上没有文字标签，必须靠这个给出"可点"的反馈 */
+	inline const FLinearColor ColEndTurnHover = FLinearColor(1.18f, 1.14f, 1.06f, 1.00f);
+
+	/** 按下时压暗，给出"确实按到了"的反馈 */
+	inline const FLinearColor ColEndTurnPress = FLinearColor(0.78f, 0.76f, 0.74f, 1.00f);
+
+	/**
+	 * 体力火苗与结束回合按钮的贴图。
+	 *
+	 * ⚠️ 按【资产实际名字】写死，含中文与那个 _3 后缀。
+	 *    LoadObject 失败是静默的（回退 nullptr → 不画图层，不报错），
+	 *    所以自检里要单独报告有没有拿到。
+	 */
+	inline const TCHAR* EnergyPipPath = TEXT("/Game/ArtResource/UI/UI_体力槽.UI_体力槽");
+	inline const TCHAR* EndTurnPath   = TEXT("/Game/ArtResource/UI/UI_结束回合_3.UI_结束回合_3");
 
 	// ══════════════════════════════════════════════════════════════
 	// 角色 UI 资产

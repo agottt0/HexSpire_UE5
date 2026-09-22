@@ -727,7 +727,7 @@ void AHexDemoHUD::DrawLegend()
 void AHexDemoHUD::DrawHelp(AHexDemoGameMode* Mode)
 {
 	const FString Help = Mode->IsInBattle()
-		? TEXT("数字键选手牌 · QWE(或点击)选固定卡 · 左键点黄格出牌 · 右键取消 · 空格结束回合 · Tab 看牌堆 · R 重开")
+		? TEXT("数字键选手牌 · QWE(或点击)选固定卡 · 左键点黄格出牌 · 右键取消 · 空格(或点右下角印章)结束回合 · Tab 看牌堆 · R 重开")
 		: TEXT("数字键选择房间 · Enter 确认 · R 重开一局");
 
 	// ⚠️ 提示行原本贴在手牌上方(SizeY-158)。固定卡区在左侧，

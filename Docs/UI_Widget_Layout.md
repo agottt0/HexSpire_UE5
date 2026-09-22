@@ -491,3 +491,105 @@ ProgressBar 的 `FillColorAndOpacity` 要 `FLinearColor`。
 ⚠️ **截图验证不了顶栏**。`HighResShot` 只抓场景渲染，不含 Slate 层 ——
 顶栏没显示和"截图抓不到顶栏"在图片上完全一样，看图会得出错误结论。
 日志自检是唯一可信的判据。
+
+---
+
+## 右下角：结束回合按钮 + 体力火苗（本次新增）
+
+打开 `Content/HexSpire/UI/WB_HandPanel`，这块已经在里面了，直接拖。
+
+```
+PanelRoot (CanvasPanel)
+├─ TopBar / StatusText / HandBox / LeftCol     （原有，未改动）
+└─ ActionCol (VerticalBox)      锚右下角，AutoSize，内缩 20/20
+   ├─ EnergyRow (HorizontalBox) 右对齐
+   │  └─ EnergyCount (TextBlock) "3/5"   ← 火苗在它左边，运行时插入
+   └─ EndTurnBox (SizeBox 104x104)
+      └─ EndTurnButton (Button)          ← UI_结束回合_3，三态同图只改染色
+```
+
+### 为什么摆右下角
+
+底部其余位置都被占了：手牌横排锚**底边中点**、固定卡锚**左侧**、
+图例（`AHexDemoHUD::DrawLegend`）在**右侧垂直居中**。右下角是底部唯一空着的地方，
+而「结束回合」必须离手牌近 —— 出完牌后的下一个动作就是它。
+
+### 火苗个数不能在蓝图里摆死
+
+火苗是**运行时按体力上限建**的（同手牌），因为 `FHexRuleBook::EnergyMax`
+受符文与装备影响，不恒是 5。蓝图里摆死 5 个的话，装上 +1 体力的符文后
+**第 6 点永远看不见**，而且不报错。
+
+设计器里那一行只有读数、没有火苗。要预览火苗请改 Class Defaults 里的
+`DesignPreviewEnergy`（默认 5，会把后两个画成「已消耗」好看出染色对比）。
+
+### 已消耗的体力是「同一张图染暗」
+
+目前只有一张火苗图，没有空态图。所以已用掉的体力是把同一张贴图
+Alpha 压到 0.28（`TB::ColEnergyPipOff`），**刻意不隐藏** ——
+隐藏的话玩家只看得到剩余量、看不出上限，而「体力上限是几」是每回合都要算的信息。
+
+正式的空态贴图仍在需求清单里（`T_EnergyCrystal_Empty`，P0）。
+
+### 按钮必须是 Button，不能是 Image
+
+`EndTurnButton` 在蓝图里**必须是 Button 类型**。摆成 Image 很自然（它就是一张图），
+但 `BindWidgetOptional` 按名字匹配时类型不符会绑成 nullptr ——
+表现是**图在屏幕上、点了没反应、一行不报错**。
+自检里有专门一条盯它（会打出实际类型）。
+
+三态用同一张贴图只改染色。**不要只设 Normal**：Hovered/Pressed 不赋值会回退到
+引擎默认的灰色圆角方块，表现是「印章一碰就变成灰方块」，看起来像贴图丢了。
+按 `Image` 画而不是默认的 `Box` —— 这张印章不是九宫格资产，
+边缘的尖角是造型的一部分，`Box` 的九宫格拉伸会把角糊掉。
+
+### AutoSize 必须开着
+
+`ActionCol` 的 CanvasPanelSlot **一定要开 AutoSize**。
+不开的话 Slate 会拿 Offset 的 Right/Bottom 当**尺寸**用
+（见 `SConstraintCanvas::OnArrangeChildren`），于是 20px 的内缩被解释成
+20×20 的槽位，104px 的按钮被挤成 20px —— 表现是「按钮小得几乎看不见」。
+自检里那条「操作区渲染尺寸」就是防这个的。
+
+### 空格键与按钮是同一个入口
+
+两条路都汇到 `AHexDemoGameMode::EndTurn()`，所以不可能出现行为差异。
+`CanEndTurn()` 与 `AHexDemoPlayerController::OnEndTurn` 的判断也是同一套
+（在战斗中 && 战斗未结束）—— 各写一份会出现「按钮亮着但点了没反应」，
+或者反过来「空格能用、按钮却是灰的」。
+
+### 验证
+
+```powershell
+& "E:\UE\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" `
+    "E:\UE_Proj\HexSpire\HexSpire.uproject" -game -HexAutoRoom `
+    -unattended -nopause -nosplash -windowed -ResX=1600 -ResY=900 `
+    -benchmark -benchmarkseconds=14 `
+    -AbsLog="E:\UE_Proj\HexSpire\Saved\Logs\tb.log"
+```
+
+战斗中应该有：
+
+```
+[自检] 右下角操作区自检
+[自检]   贴图：结束回合=有 体力火苗=有
+[自检]   操作区渲染尺寸 200x140（按钮边长常量 104）
+[自检]   结束回合按钮：类型=Button 点击已接线=是 可按=是（当前在战斗中）
+[自检]   体力火苗已建 5 个
+[自检]   火苗亮暗 [亮亮亮暗暗]（当前体力 3/5 —— 亮的个数应等于当前体力）
+[自检]   模拟点击生效：回合 1 → 2
+```
+
+⚠️ **「点击已接线=是」不足以说明按钮能用**，它只证明委托非空。
+所以自检在 `-HexAutoRoom` 下会**真的广播一次点击**并比对回合数 ——
+绑错对象、绑到别的函数、或 `OnEndTurnClicked` 里被某个判空提前 return，
+这三种情况 `IsBound()` 都是 true 而按钮点了没反应。
+回合数变了才说明点击真的走到了逻辑层。
+
+⚠️ 那次模拟点击**只在 `-HexAutoRoom` 下执行**（它真的会结束一个回合）。
+同一个开关下还会先打一张牌 —— 不打的话体力恒满，
+「火苗亮暗」那条永远全亮，等于测不到染色有没有生效。
+
+⚠️ 地图界面下这块是**故意整块折叠**的（地图上没有回合可结束），
+所以尺寸检查只在战斗中做。不分状态地报错等于每次进地图喊一次狼来了，
+而假警报会训练人忽略整条自检 —— 比没有自检更糟。
