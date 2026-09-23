@@ -141,8 +141,17 @@ public:
 
 	bool HasStatus(FName StatusId) const;
 
-	/** 施加状态（按 StackMode 处理叠加），返回实际生效后的层数 */
-	int32 ApplyStatus(FName StatusId, int32 Stacks);
+	/**
+	 * 施加状态（按 StackMode 处理叠加），返回实际生效后的层数。
+	 *
+	 * @param SourceUnitId 施加者。默认 -1 = 环境/未知。
+	 *        ⚠️ 攻击方施加的 debuff【务必传入攻击者 id】，
+	 *        否则燃烧/中毒致死时会被判为环境击杀，
+	 *        OnKill 类符文（如《食魂》）在烧流下静默失效。
+	 *        参数有默认值只是为了不惊动既有的几十处调用，
+	 *        不代表可以省略。
+	 */
+	int32 ApplyStatus(FName StatusId, int32 Stacks, int32 SourceUnitId = -1);
 
 	/** 移除状态 */
 	void RemoveStatus(FName StatusId);

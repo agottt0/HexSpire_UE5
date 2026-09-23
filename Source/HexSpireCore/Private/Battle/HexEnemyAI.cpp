@@ -464,8 +464,12 @@ void FHexEnemyAI::ExecuteIntent(FHexBattleState& State, FHexUnit& Enemy, FHexAct
 			const FHexUnit* Tracked = State.FindUnit(Intent.TrackedUnitId);
 			if (Tracked)
 			{
+				// ⚠️ 末参数传 Enemy.Id：归属必须对称。
+				//    玩家的毒算玩家击杀，敌人的毒就得算敌人击杀 ——
+				//    否则敌人毒死玩家时会被判成"环境击杀"，
+				//    将来做"复仇/受击反制"类符文会全部失准。
 				Queue.PushBack(FHexActions::ApplyStatus(
-					Tracked->Id, Intent.StatusId, Intent.StatusStacks));
+					Tracked->Id, Intent.StatusId, Intent.StatusStacks, Enemy.Id));
 			}
 		}
 		break;
@@ -474,7 +478,7 @@ void FHexEnemyAI::ExecuteIntent(FHexBattleState& State, FHexUnit& Enemy, FHexAct
 		if (!Intent.StatusId.IsNone())
 		{
 			Queue.PushBack(FHexActions::ApplyStatus(
-				Enemy.Id, Intent.StatusId, Intent.StatusStacks));
+				Enemy.Id, Intent.StatusId, Intent.StatusStacks, Enemy.Id));
 		}
 		break;
 

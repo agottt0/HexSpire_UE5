@@ -81,6 +81,29 @@ public:
 	/** 战斗胜利后：结算并回到地图 */
 	void FinishBattleAndReturnToMap();
 
+	// ═══════════════════════════════════════════ 层结算（§6.6 / §9.8）
+
+	/**
+	 * 是否正在等待玩家选择层结算奖励。
+	 *
+	 * ⚠️ 这个阶段必须【阻塞进入下一间房】：
+	 *    否则玩家会直接点下一间房，奖励静默消失 ——
+	 *    而这是获得符文的唯一途径。
+	 */
+	bool IsAwaitingRewardChoice() const { return bAwaitingRewardChoice; }
+
+	/** 当前待选的奖励项 */
+	const TArray<FHexRewardOption>& GetPendingRewards() const { return PendingRewards; }
+
+	/**
+	 * 选择一项奖励并应用。
+	 * @param Index 奖励下标；越界视为"全部放弃"
+	 */
+	void ChooseReward(int32 Index);
+
+	/** 放弃全部奖励（§6.6 允许） */
+	void DeclineRewards();
+
 	/** 营地休息 */
 	void RestAtCamp();
 
@@ -168,4 +191,16 @@ private:
 
 	/** 卡实例 uid 分配器（战斗内注入的衍生卡用） */
 	int32 NextRuntimeUid = 100000;
+
+	// ── 层结算
+	/**
+	 * 当前所在房间的类型。
+	 * ⚠️ 必须在战斗【开始时】记下来：FinishBattleAndReturnToMap 里
+	 *    房间已被标记为 Cleared，那时再查类型拿到的是清空后的状态，
+	 *    判不出"刚打的是不是 Boss"。
+	 */
+	EHexRoomType CurrentRoomType = EHexRoomType::Combat;
+
+	TArray<FHexRewardOption> PendingRewards;
+	bool bAwaitingRewardChoice = false;
 };

@@ -44,6 +44,9 @@ private:
 	/** Q/W/E：选择左侧的固定卡 */
 	void OnFixedCardKey(int32 Index);
 
+	/** 0 键：放弃本层结算奖励（§6.6 允许全部放弃） */
+	void OnDeclineRewards();
+
 	// ⚠️ TrySelectFixedCardAtCursor 已删除。
 	//    卡牌命中测试交给 Slate（UHexCardWidget::NativeOnMouseButtonDown），
 	//    不再由这里手算矩形 —— 两套坐标必然分叉。

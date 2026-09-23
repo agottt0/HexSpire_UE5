@@ -909,6 +909,245 @@ namespace
 			}
 		}
 
+		// ── 符文装备与替换流程（§6.6）
+		//
+		// ══════════════════════════════════════════════════════════
+		// 为什么这一节必须有：RuneInventory 原本【只进不出】
+		// ══════════════════════════════════════════════════════════
+		// ApplyReward 在满槽时会把符文塞进 RuneInventory，
+		// 但全工程【没有任何代码能把它装回槽位】——
+		// 玩家攒一堆符文却永远用不上，等于奖励凭空消失。
+		//
+		// §6.6 明确要求"三选一界面下方显示当前 6 槽，玩家指定覆盖目标"，
+		// 这需要三个能力：从背包装备、替换指定槽、槽位重排。
+		// 三者原先都没有可调用的 API。
+		{
+			FHexRngStreams Rng(11);
+			FHexRunState Run(11);
+			Run.BeginRun(TEXT("warden"), Rng);
+
+			// 先把 6 槽塞满（用符文库里的前 6 个）
+			const TArray<FHexRuneData>& All = FHexRuneLibrary::AllRunes();
+			Ctx.Check(TEXT("符文库至少有 7 个符文（替换测试需要）"),
+				All.Num() >= 7, TEXT(""));
+
+			if (All.Num() >= 7)
+			{
+				for (int32 I = 0; I < FHexRuneLoadout::SlotCount; ++I)
+				{
+					Run.RuneLoadout.SetSlot(I, &All[I]);
+				}
+				Ctx.CheckEqual(TEXT("6 槽已塞满"),
+					Run.RuneLoadout.GetFilledCount(), FHexRuneLoadout::SlotCount);
+
+				// ── 满槽时获得新符文 → 进背包
+				Run.RuneInventory.Reset();
+				{
+					FHexRewardOption Opt;
+					Opt.Kind = FHexRewardOption::EKind::Rune;
+					Opt.ContentId = All[6].Id;
+					Run.ApplyReward(Opt, Rng);
+				}
+				Ctx.Check(TEXT("满槽时新符文进入背包"),
+					Run.RuneInventory.Contains(All[6].Id),
+					TEXT("满槽的符文既没装上也没进背包 → 奖励凭空消失"));
+
+				// ── 从背包装备到指定槽（替换）
+				const FName Replaced = All[2].Id;
+				const bool bEquipped = Run.EquipRuneFromInventory(All[6].Id, 2);
+
+				Ctx.Check(TEXT("能把背包里的符文装到指定槽（§6.6 替换）"),
+					bEquipped,
+					TEXT("没有'从背包装备'的能力 → 玩家攒的符文永远用不上"));
+
+				if (bEquipped)
+				{
+					const FHexRuneData* InSlot = Run.RuneLoadout.GetSlot(2);
+					Ctx.Check(TEXT("目标槽已换成新符文"),
+						InSlot && InSlot->Id == All[6].Id, TEXT(""));
+
+					Ctx.Check(TEXT("新符文已从背包移除"),
+						!Run.RuneInventory.Contains(All[6].Id),
+						TEXT("装备后仍留在背包 → 同一符文可被无限复制"));
+
+					// ⚠️ 被替换下来的符文必须【销毁】，不能回背包。
+					//    §6.6 原文："被覆盖的符文销毁，不可回收"。
+					//    若回收进背包，玩家就能在 6 槽间无成本地反复横跳，
+					//    "选择覆盖哪个"这个决策会失去代价。
+					Ctx.Check(TEXT("被替换的符文已销毁（§6.6 不可回收）"),
+						!Run.RuneInventory.Contains(Replaced),
+						TEXT("被替换的符文回到了背包 → 替换失去代价，"
+							 "玩家可无成本反复横跳"));
+				}
+
+				// ── 槽位重排（§6.5：顺序影响结算，所以重排是真实操作）
+				{
+					const FHexRuneData* Before0 = Run.RuneLoadout.GetSlot(0);
+					const FHexRuneData* Before5 = Run.RuneLoadout.GetSlot(5);
+
+					const bool bMoved = Run.ReorderRune(0, 5);
+					Ctx.Check(TEXT("能重排符文槽位（§6.5 顺序即策略）"),
+						bMoved, TEXT(""));
+
+					if (bMoved)
+					{
+						Ctx.Check(TEXT("重排后两槽内容交换"),
+							Run.RuneLoadout.GetSlot(0) == Before5
+							&& Run.RuneLoadout.GetSlot(5) == Before0,
+							TEXT("重排没有真正交换内容"));
+					}
+				}
+
+				// ── 非法输入不得破坏状态
+				{
+					const int32 FilledBefore = Run.RuneLoadout.GetFilledCount();
+					Ctx.Check(TEXT("装备不存在的符文被拒绝"),
+						!Run.EquipRuneFromInventory(TEXT("__no_such_rune__"), 0),
+						TEXT(""));
+					Ctx.Check(TEXT("越界槽位被拒绝"),
+						!Run.ReorderRune(0, 99), TEXT(""));
+					Ctx.CheckEqual(TEXT("非法操作未改变槽位占用数"),
+						Run.RuneLoadout.GetFilledCount(), FilledBefore);
+				}
+
+				// ── 战斗中锁定（§6.5）
+				//
+				// ⚠️ 原先这条只写在注释里说"由调用方保证"——
+				//    而"由调用方保证"等于没保证。锁必须在逻辑层，
+				//    否则任何一个忘了检查的 UI 入口都能让玩家
+				//    在战斗中途反复重排去找最优顺序。
+				{
+					// 先卸一个到背包，好有东西可装
+					Run.UnequipRuneToInventory(1);
+					const bool bHasInvItem = Run.RuneInventory.Num() > 0;
+
+					Run.bRuneLayoutLocked = true;
+
+					Ctx.Check(TEXT("战斗中禁止重排符文（§6.5）"),
+						!Run.ReorderRune(0, 3),
+						TEXT("战斗中仍可重排 → 顺序决策退化为每回合手动最优化"));
+
+					if (bHasInvItem)
+					{
+						Ctx.Check(TEXT("战斗中禁止装备符文"),
+							!Run.EquipRuneFromInventory(Run.RuneInventory[0], 1),
+							TEXT(""));
+					}
+					Ctx.Check(TEXT("战斗中禁止卸下符文"),
+						!Run.UnequipRuneToInventory(0), TEXT(""));
+
+					// 解锁后恢复正常
+					Run.bRuneLayoutLocked = false;
+					Ctx.Check(TEXT("解锁后可正常重排"),
+						Run.ReorderRune(0, 3), TEXT(""));
+				}
+			}
+		}
+
+		// ── 层结算三选一（§6.6）
+		//
+		// ⚠️ 这是获得符文的【唯一途径】。它原先只被试玩 commandlet
+		//    调用过（而且无脑取 Rewards[0]），游戏侧没有任何入口 ——
+		//    玩家打赢 Boss 拿不到符文，D6 整个系统是死的。
+		{
+			FHexRngStreams Rng(12);
+			FHexRunState Run(12);
+			Run.BeginRun(TEXT("warden"), Rng);
+
+			TArray<FHexRewardOption> Rewards;
+			Run.GenerateFloorRewards(Rng, Rewards);
+
+			Ctx.Check(TEXT("层结算能生成奖励选项"),
+				Rewards.Num() > 0,
+				TEXT("生成不出奖励 → 打赢 Boss 什么都拿不到"));
+
+			// 必须至少有一个符文选项 —— 否则层结算不是"符文的入口"
+			int32 RuneOptions = 0;
+			bool bAllHaveDesc = true;
+			bool bNoCursed = true;
+			for (const FHexRewardOption& R : Rewards)
+			{
+				if (R.Kind == FHexRewardOption::EKind::Rune)
+				{
+					++RuneOptions;
+					// 诅咒不该进必选的三选一（策划案：强迫玩家吃亏）
+					const FHexRuneData* Rune = FHexRuneLibrary::FindRune(R.ContentId);
+					if (Rune && Rune->bIsCursed)
+					{
+						bNoCursed = false;
+					}
+				}
+				// R8：每项都要能读懂
+				if (R.Description.IsEmpty())
+				{
+					bAllHaveDesc = false;
+				}
+			}
+
+			Ctx.Check(TEXT("层结算包含符文选项（§6.6 保底）"),
+				RuneOptions > 0,
+				TEXT("三选一里没有符文 → 符文没有获取途径"));
+
+			Ctx.Check(TEXT("奖励项都有机制说明（R8）"),
+				bAllHaveDesc,
+				TEXT("选项没有说明 → 玩家无法判断该选哪个，三选一变抽奖"));
+
+			Ctx.Check(TEXT("三选一不含诅咒符文"),
+				bNoCursed,
+				TEXT("必选场合塞诅咒 = 强迫玩家吃亏"));
+
+			// 应用一次必须真的生效
+			if (Rewards.Num() > 0)
+			{
+				const int32 FilledBefore = Run.RuneLoadout.GetFilledCount();
+				int32 RuneIdx = INDEX_NONE;
+				for (int32 I = 0; I < Rewards.Num(); ++I)
+				{
+					if (Rewards[I].Kind == FHexRewardOption::EKind::Rune)
+					{
+						RuneIdx = I;
+						break;
+					}
+				}
+
+				if (RuneIdx != INDEX_NONE)
+				{
+					Ctx.Check(TEXT("应用符文奖励成功"),
+						Run.ApplyReward(Rewards[RuneIdx], Rng), TEXT(""));
+					Ctx.CheckEqual(TEXT("符文真的装进了槽位"),
+						Run.RuneLoadout.GetFilledCount(), FilledBefore + 1);
+				}
+			}
+
+			// 已持有的符文不该再出现在三选一里
+			{
+				TArray<FHexRewardOption> Again;
+				Run.GenerateFloorRewards(Rng, Again);
+
+				TSet<FName> Owned;
+				TArray<TPair<int32, const FHexRuneData*>> Equipped;
+				Run.RuneLoadout.GetRunesInOrder(Equipped);
+				for (const TPair<int32, const FHexRuneData*>& P : Equipped)
+				{
+					if (P.Value) { Owned.Add(P.Value->Id); }
+				}
+
+				bool bNoDup = true;
+				for (const FHexRewardOption& R : Again)
+				{
+					if (R.Kind == FHexRewardOption::EKind::Rune
+						&& Owned.Contains(R.ContentId))
+					{
+						bNoDup = false;
+						break;
+					}
+				}
+				Ctx.Check(TEXT("三选一不重复已持有的符文"),
+					bNoDup,
+					TEXT("给已装备的符文 = 这一选等于没有选项"));
+			}
+		}
+
 		// ── 腐蚀度累积
 		{
 			FHexRngStreams Rng(4);

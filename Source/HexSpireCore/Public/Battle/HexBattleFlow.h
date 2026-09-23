@@ -49,6 +49,7 @@
 
 class FHexBattleState;
 struct FHexCardData;
+struct FHexBattleEvent;
 
 /** 出牌尝试的结果 */
 enum class EHexPlayResult : uint8
@@ -101,6 +102,18 @@ public:
 
 	/** 战斗是否已结束 */
 	bool IsBattleOver() const;
+
+	/**
+	 * 某触发时机在本场战斗中被派发了多少次。
+	 *
+	 * ⚠️ 存在的唯一目的是让验证器能断言「每个时机都真的有埋点」。
+	 *    漏埋点不会报错，只会让挂在该时机上的符文静默失效 ——
+	 *    详见 VerifyTrigger 的 CheckTimingCoverage。
+	 */
+	int32 GetTimingFireCount(EHexTriggerTiming Timing) const
+	{
+		return TriggerBus.GetEmitCount(Timing);
+	}
 
 	// ───────────────────────────────────────────── 查询（UI 用）
 
@@ -176,8 +189,44 @@ private:
 	/** 由 uid 找到卡牌定义（手牌或固定卡） */
 	const FHexCardData* CardFromUid(int32 CardUid) const;
 
+	// ─────────────────────────────────────────── 触发派发（§6.3）
+
+	/**
+	 * 结算动作队列 —— 【本类唯一允许的结算入口】。
+	 *
+	 * ⚠️ 不要再直接写 Queue.ResolveAll(State)：
+	 *    那样会绕过下面的触发翻译，符文重新变成静默失效。
+	 */
+	int32 ResolveQueue();
+
+	/**
+	 * 把「刚执行完的动作 + 它产生的事件」翻译成触发时机并派发。
+	 * 这是 §6.3 时机表中动作型时机的【唯一】埋点处。
+	 * 分工表见 .cpp 实现处的注释。
+	 */
+	void DispatchTriggersForAction(
+		const FHexGameAction& Action,
+		TArrayView<const FHexBattleEvent> NewEvents,
+		FHexActionQueue& InQueue);
+
+	/** 带连锁预算地 Emit 一个时机 */
+	void EmitWithBudget(
+		EHexTriggerTiming Timing,
+		const FHexTriggerContext& Ctx,
+		FHexActionQueue& InQueue);
+
+	/** 该单位是否属于玩家方（决定"我造成"还是"我承受"） */
+	bool IsPlayerSide(int32 UnitId) const;
+
 	FHexBattleState& State;
 	FHexActionQueue Queue;
 	FHexTriggerBus TriggerBus;
 	FCardLookup CardLookup;
+
+	/**
+	 * 本次 ResolveQueue 内，翻译器还能 Emit 多少次。
+	 * 见 HexK::MaxObserverEmitsPerResolve —— 它堵的是
+	 * 递归深度闸盖不住的「符文自激」。
+	 */
+	int32 ObserverEmitBudget = 0;
 };

@@ -198,6 +198,25 @@ public:
 
 	int32 NumPendingEvents() const { return EventLog.Num(); }
 
+	/**
+	 * 从 StartIndex 起的待发事件（只读切片）。
+	 *
+	 * ══════════════════════════════════════════════════════════════
+	 * 为什么逻辑层要读事件日志，以及为什么这样是安全的
+	 * ══════════════════════════════════════════════════════════════
+	 * 「格挡被打破」「这一击打死了目标」「抽牌时触发了洗回」这类事实
+	 * 只在 Resolver 内部才能判断（要对比扣减前后的值、要看 Draw 的
+	 * 返回标志）。动作参数本身看不出来。
+	 * 而 Resolver 已经把它们精确记录成了事件 ——
+	 * 与其在别处重算一遍（必然算歪），不如直接读这份权威记录。
+	 *
+	 * ⚠️ 安全的前提是【只在同一次 ResolveAll 内部、Drain 之前读】：
+	 *    ResolveAll 是同步的，期间表现层不可能插进来 Drain。
+	 *    绝对不要把它当"历史事件查询"用 —— 表现层 Drain 过之后
+	 *    索引就失效了，而且失效是静默的。
+	 */
+	TArrayView<const FHexBattleEvent> GetPendingEventsFrom(int32 StartIndex) const;
+
 	// ───────────────────────────────────────────── 动作日志（确定性验证 / 战报 / 回放）
 
 	void LogAction(const FHexGameAction& Action);

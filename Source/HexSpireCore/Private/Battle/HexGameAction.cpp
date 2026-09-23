@@ -158,9 +158,11 @@ FHexGameAction FHexActions::Trample(int32 SourceId, int32 TargetId)
 	return A;
 }
 
-FHexGameAction FHexActions::ApplyStatus(int32 TargetId, FName StatusId, int32 Stacks)
+FHexGameAction FHexActions::ApplyStatus(
+	int32 TargetId, FName StatusId, int32 Stacks, int32 SourceId)
 {
 	FHexGameAction A = Make(EHexActionType::ApplyStatus);
+	A.SourceUnitId = SourceId;
 	A.TargetUnitId = TargetId;
 	A.NameA = StatusId;
 	A.IntA = Stacks;
@@ -267,7 +269,7 @@ void FHexActionQueue::Reset()
 	PendingInsertOffset = 0;
 }
 
-int32 FHexActionQueue::ResolveAll(FHexBattleState& State)
+int32 FHexActionQueue::ResolveAll(FHexBattleState& State, const FHexActionObserver& Observer)
 {
 	if (bResolving)
 	{
@@ -291,8 +293,25 @@ int32 FHexActionQueue::ResolveAll(FHexBattleState& State)
 		}
 
 		PendingInsertOffset = 0;
-		FHexActionResolver::Execute(Actions[CursorIndex], State);
+
+		// ⚠️ 记住执行前的事件游标：差集就是"这个动作造成了什么"。
+		//    block_broken / unit_died 只存在于事件里，动作参数看不出来。
+		const int32 EventCursor = State.NumPendingEvents();
+
+		// ⚠️ 必须先拷贝再执行：观察者可能 PushNext，
+		//    Actions 重新分配后 Actions[CursorIndex] 的引用会悬空。
+		const FHexGameAction Executing = Actions[CursorIndex];
+
+		FHexActionResolver::Execute(Executing, State);
 		++Executed;
+
+		if (Observer)
+		{
+			// ⚠️ 这里【不能】重置 PendingInsertOffset：
+			//    观察者 PushNext 的子动作要排在本动作之后，
+			//    且多个子动作之间要保持插入顺序（§6.5 槽位语义）。
+			Observer(Executing, State.GetPendingEventsFrom(EventCursor), State, *this);
+		}
 	}
 
 	bResolving = false;

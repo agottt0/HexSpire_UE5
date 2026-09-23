@@ -76,6 +76,18 @@ void AHexDemoPlayerController::SetupInputComponent()
 			[this, I]() { OnFixedCardKey(I); });
 		InputComponent->KeyBindings.Add(Binding);
 	}
+
+	// 0 键：放弃层结算奖励（§6.6 允许全部放弃）
+	InputComponent->BindKey(EKeys::Zero, IE_Pressed,
+		this, &AHexDemoPlayerController::OnDeclineRewards);
+}
+
+void AHexDemoPlayerController::OnDeclineRewards()
+{
+	if (AHexDemoGameMode* Mode = GetDemoMode())
+	{
+		Mode->DeclineRewards();
+	}
 }
 
 void AHexDemoPlayerController::OnFixedCardKey(int32 Index)
@@ -276,6 +288,17 @@ void AHexDemoPlayerController::OnNumberKey(int32 Index)
 		}
 
 		Mode->SelectCard(Hand[Index].Uid);
+		return;
+	}
+
+	// ── 层结算：选奖励
+	//
+	// ⚠️ 必须排在"选房间"【之前】。
+	//    两者共用数字键，若顺序反了，玩家按 1 会直接进下一间房，
+	//    本层奖励静默消失 —— 而那是获得符文的唯一途径。
+	if (Mode->IsAwaitingRewardChoice())
+	{
+		Mode->ChooseReward(Index);
 		return;
 	}
 

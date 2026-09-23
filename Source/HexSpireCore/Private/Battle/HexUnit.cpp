@@ -152,7 +152,7 @@ bool FHexUnit::HasStatus(FName StatusId) const
 	return GetStatusStacks(StatusId) > 0;
 }
 
-int32 FHexUnit::ApplyStatus(FName StatusId, int32 Stacks)
+int32 FHexUnit::ApplyStatus(FName StatusId, int32 Stacks, int32 SourceUnitId)
 {
 	if (Stacks <= 0 || !FHexStatusLibrary::Exists(StatusId))
 	{
@@ -167,6 +167,17 @@ int32 FHexUnit::ApplyStatus(FName StatusId, int32 Stacks)
 		if (S.Id != StatusId)
 		{
 			continue;
+		}
+
+		// ⚠️ 归属权交给【最后一次】施加者。
+		//    理由：玩家心智里"最后补刀的人"才是击杀者；
+		//    而且这样玩家刷新状态后必然拿回归属权，
+		//    不会出现"我点燃的火却算成敌人击杀"。
+		//    传 -1（环境/未指定）时不覆盖已有归属 ——
+		//    否则一次环境 tick 就会把玩家的击杀功劳抹掉。
+		if (SourceUnitId >= 0)
+		{
+			S.SourceUnitId = SourceUnitId;
 		}
 
 		switch (Def.StackMode)
@@ -202,6 +213,7 @@ int32 FHexUnit::ApplyStatus(FName StatusId, int32 Stacks)
 	New.Stacks = FMath::Min(Stacks, Def.MaxStack);
 	New.Duration = New.Stacks;
 	New.AbsorbLeft = Def.bIsAbsorbShield ? Stacks : 0;
+	New.SourceUnitId = SourceUnitId;
 	Statuses.Add(New);
 
 	// ⚠️ 确定性（纪律 5）：状态数组必须保持确定顺序，

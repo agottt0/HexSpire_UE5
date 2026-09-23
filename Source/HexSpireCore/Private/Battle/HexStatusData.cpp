@@ -259,4 +259,7 @@ void FHexStatusInstance::Serialize(FArchive& Ar)
 	Ar << Stacks;
 	Ar << Duration;
 	Ar << AbsorbLeft;
+	// ⚠️ 必须存：读档后若丢失施加者，燃烧致死会从"玩家击杀"
+	//    退化成"环境击杀"，OnKill 类符文在读档后静默变弱。
+	Ar << SourceUnitId;
 }

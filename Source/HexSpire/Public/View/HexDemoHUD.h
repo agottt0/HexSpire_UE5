@@ -54,6 +54,16 @@ private:
 	void DrawMapPanel(AHexDemoGameMode* Mode);
 
 	/**
+	 * 层结算三选一（§6.6 / §9.8）。
+	 *
+	 * ⚠️ 必须显示每项的【机制说明】而不只是名字（R8）：
+	 *    符文看不懂 → 无法推理组合 → D6 的价值归零。
+	 * ⚠️ 也必须显示当前 6 槽：满槽时新符文会进背包，
+	 *    玩家得先看到现有配置才能判断值不值得替换。
+	 */
+	void DrawRewardPanel(AHexDemoGameMode* Mode);
+
+	/**
 	 * 确保手牌控件已创建并加进视口。
 	 *
 	 * ⚠️ 手牌与固定卡已改为 UMG（UHexHandPanelWidget），

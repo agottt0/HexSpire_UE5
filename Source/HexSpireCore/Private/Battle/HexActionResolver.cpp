@@ -495,7 +495,11 @@ void FHexActionResolver::Execute(const FHexGameAction& Action, FHexBattleState& 
 		{
 			break;
 		}
-		const int32 NewStacks = Target->ApplyStatus(Action.NameA, Action.IntA);
+		// ⚠️ 必须把施加者传下去（Action.SourceUnitId）。
+		//    不传的话，这个 debuff 的 tick 伤害致死时会被判为
+		//    环境击杀，OnKill 类符文在烧流/毒流下静默失效。
+		const int32 NewStacks = Target->ApplyStatus(
+			Action.NameA, Action.IntA, Action.SourceUnitId);
 		if (NewStacks > 0)
 		{
 			FHexBattleEvent E;
@@ -540,6 +544,20 @@ void FHexActionResolver::Execute(const FHexGameAction& Action, FHexBattleState& 
 		int32 TotalNormal = 0;
 		int32 TotalIgnoreBlock = 0;
 
+		// ⚠️ 归属：取【本次 tick 中伤害最高的那个状态】的施加者。
+		//
+		//    为什么不拆成逐状态多次结算：那会改变伤害的分批方式
+		//    （原先两桶合并成一次扣血），从而改变格挡吸收的结果和
+		//    "恰好打死"的时点 —— 属于行为变更，会打破既有断言，
+		//    而本次修复只应改变【击杀归属】这一件事。
+		//
+		//    为什么取伤害最高者：玩家心智里"主要死因"就是击杀者。
+		//    同伤害时按状态 id 顺序取先者（Statuses 已排序，确定性）。
+		int32 CreditNormal = -1;
+		int32 CreditIgnore = -1;
+		int32 BestNormalDmg = 0;
+		int32 BestIgnoreDmg = 0;
+
 		for (const FHexStatusInstance& S : Target->Statuses)
 		{
 			const FHexStatusDef& Def = FHexStatusLibrary::Get(S.Id);
@@ -551,10 +569,20 @@ void FHexActionResolver::Execute(const FHexGameAction& Action, FHexBattleState& 
 			if (Def.bTickIgnoresBlock)
 			{
 				TotalIgnoreBlock += Dmg;
+				if (Dmg > BestIgnoreDmg)
+				{
+					BestIgnoreDmg = Dmg;
+					CreditIgnore = S.SourceUnitId;
+				}
 			}
 			else
 			{
 				TotalNormal += Dmg;
+				if (Dmg > BestNormalDmg)
+				{
+					BestNormalDmg = Dmg;
+					CreditNormal = S.SourceUnitId;
+				}
 			}
 		}
 
@@ -571,13 +599,15 @@ void FHexActionResolver::Execute(const FHexGameAction& Action, FHexBattleState& 
 		// 中毒无视格挡（这是它与燃烧的唯一区别，也是它存在的理由）
 		if (TotalIgnoreBlock > 0)
 		{
-			ApplyDamageToUnit(State, *Target, 0, 0, TotalIgnoreBlock, -1, false);
+			ApplyDamageToUnit(State, *Target, 0, 0, TotalIgnoreBlock,
+				CreditIgnore, false);
 		}
 		// 燃烧可被格挡吸收
 		if (TotalNormal > 0 && Target->bIsAlive)
 		{
 			const int32 ToBlock = FMath::Min(TotalNormal, Target->Block);
-			ApplyDamageToUnit(State, *Target, 0, ToBlock, TotalNormal - ToBlock, -1, false);
+			ApplyDamageToUnit(State, *Target, 0, ToBlock, TotalNormal - ToBlock,
+				CreditNormal, false);
 		}
 		break;
 	}

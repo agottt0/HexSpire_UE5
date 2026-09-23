@@ -22,6 +22,38 @@
 #include "Core/HexSpireConstants.h"
 
 class FHexBattleState;
+struct FHexBattleEvent;
+struct FHexGameAction;
+class FHexActionQueue;
+
+/**
+ * 结算观察者：每个动作执行完毕后被调用一次。
+ *
+ * ══════════════════════════════════════════════════════════════════
+ * 为什么触发时机要走这里，而不是在业务代码里一处处手写 Emit
+ * ══════════════════════════════════════════════════════════════════
+ * 手写埋点的失败方式是【静默】的：漏一个时机，挂在它上面的符文
+ * 就永远不响应 —— 不报错、不崩溃，只显得"这个符文很弱"。
+ *
+ * 这件事已经真实发生过：22 个时机里 8 个没有埋点，
+ * 《食魂》(OnKill)、《焚心》(OnCrit)、《轮回护符》(OnDeckReshuffled)
+ * 三个符文装上去完全没有效果，而 1049 项断言全部通过。
+ *
+ * 动作是状态变更的唯一通道（纪律 2），所以"动作执行完"是唯一
+ * 不会漏的埋点位置。集中到一处之后，新增动作类型最坏情况是
+ * "翻译表里少一条"，而那是能被埋点覆盖率断言抓住的。
+ *
+ * @param Action    刚执行完的动作
+ * @param NewEvents 本动作产生的事件。block_broken / unit_died 这类
+ *                  只有 Resolver 内部能判断的事实全在这里。
+ * @param State     当前状态（只读用途；要改状态必须再推动作）
+ * @param Queue     可用 PushNext 追加子动作，保持槽位顺序语义
+ */
+using FHexActionObserver = TFunction<void(
+	const FHexGameAction& Action,
+	TArrayView<const FHexBattleEvent> NewEvents,
+	FHexBattleState& State,
+	FHexActionQueue& Queue)>;
 
 /**
  * 动作类型。
@@ -134,7 +166,13 @@ struct HEXSPIRECORE_API FHexActions
 	static FHexGameAction Knockback(int32 SourceId, int32 TargetId, int32 Distance);
 	static FHexGameAction Trample(int32 SourceId, int32 TargetId);
 
-	static FHexGameAction ApplyStatus(int32 TargetId, FName StatusId, int32 Stacks);
+	/**
+	 * @param SourceId 施加者。-1 = 环境。
+	 *        ⚠️ 玩家/敌人施加的 debuff 必须传 id：
+	 *        它决定燃烧、中毒致死时算谁的击杀（影响 OnKill 类符文）。
+	 */
+	static FHexGameAction ApplyStatus(
+		int32 TargetId, FName StatusId, int32 Stacks, int32 SourceId = -1);
 	static FHexGameAction RemoveStatus(int32 TargetId, FName StatusId);
 	static FHexGameAction TickStatus(int32 TargetId, EHexStatusTick Timing);
 
@@ -176,9 +214,13 @@ public:
 
 	/**
 	 * 顺序执行全部动作直到队列空。
+	 *
+	 * @param Observer 可选。每个动作执行后被调用，用于把动作翻译成
+	 *                 触发时机（见 FHexActionObserver）。
+	 *                 传空则退化为纯结算，行为与从前逐位相同。
 	 * @return 实际执行的动作数
 	 */
-	int32 ResolveAll(FHexBattleState& State);
+	int32 ResolveAll(FHexBattleState& State, const FHexActionObserver& Observer = nullptr);
 
 	const TArray<FHexGameAction>& GetActions() const { return Actions; }
 

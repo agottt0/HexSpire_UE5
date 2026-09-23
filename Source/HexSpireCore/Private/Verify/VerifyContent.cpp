@@ -496,9 +496,12 @@ namespace
 
 		const TArray<FHexRuneData>& Runes = FHexRuneLibrary::AllRunes();
 
-		// 用户决策 q11：第一版 12–18 个
-		Ctx.Check(TEXT("符文数量在 12–18 之间(q11)"),
-			Runes.Num() >= 12 && Runes.Num() <= 18,
+		// ⚠️ 下限 12 保留（低于这个数三选一会频繁抽空），
+		//    上限放到 120 —— 策划案 §6.1 的目标是 90–120 个。
+		//    原先卡在 18 是"第一版 q11"的约定，内容扩充时必须同步放宽，
+		//    否则加符文反而会让验证变红，逼人去删内容。
+		Ctx.Check(TEXT("符文数量在 12–120 之间（§6.1 目标 90–120）"),
+			Runes.Num() >= 12 && Runes.Num() <= 120,
 			FString::Printf(TEXT("数量=%d"), Runes.Num()));
 
 		{

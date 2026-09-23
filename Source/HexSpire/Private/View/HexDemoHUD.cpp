@@ -200,6 +200,17 @@ void AHexDemoHUD::DrawMapPanel(AHexDemoGameMode* Mode)
 		return;
 	}
 
+	// ── 层结算优先：有待选奖励时画奖励面板而不是房间列表
+	//
+	// ⚠️ 两者都占屏幕中央。若同时画会互相压字；
+	//    若只画房间列表，玩家根本不知道有奖励可选 ——
+	//    而层结算三选一是获得符文的唯一途径（§6.6）。
+	if (Mode->IsAwaitingRewardChoice())
+	{
+		DrawRewardPanel(Mode);
+		return;
+	}
+
 	TArray<FHexRoomChoice> Choices;
 	Mode->GetRoomChoices(Choices);
 
@@ -687,6 +698,122 @@ void AHexDemoHUD::DrawPileBrowser(AHexDemoGameMode* Mode)
 	DrawTextShadowed(TEXT("Tab 关闭"), X + 10.0f, Y + H - 22.0f, ColDim, 0.85f);
 }
 
+// ══════════════════════════════════════════════════════════ 层结算奖励
+
+void AHexDemoHUD::DrawRewardPanel(AHexDemoGameMode* Mode)
+{
+	const FHexRunState* Run = Mode->GetRunState();
+	const TArray<FHexRewardOption>& Rewards = Mode->GetPendingRewards();
+	if (!Run)
+	{
+		return;
+	}
+
+	// 每项占两行（标题 + 机制说明），所以行高给足
+	const float PanelW = 720.0f;
+	const float PanelH = 150.0f + Rewards.Num() * 56.0f + 90.0f;
+	const float X = (Canvas->SizeX - PanelW) * 0.5f;
+	const float Y = FMath::Max(90.0f, Canvas->SizeY * 0.18f);
+
+	DrawPanel(X, Y, PanelW, PanelH, ColPanel, 0.94f);
+	DrawSolidBox(X, Y, PanelW, PanelH, FLinearColor(0.72f, 0.60f, 0.25f), 2.5f);
+
+	DrawTextShadowed(TEXT("★ 层结算 —— 选择一项奖励"),
+		X + 18.0f, Y + 12.0f, ColWarn, 1.2f);
+	DrawTextShadowed(TEXT("数字键选择 · 0 键全部放弃"),
+		X + 18.0f, Y + 38.0f, ColDim);
+
+	float RowY = Y + 68.0f;
+	for (int32 I = 0; I < Rewards.Num(); ++I)
+	{
+		const FHexRewardOption& R = Rewards[I];
+
+		// 按类型着色，让玩家一眼分清"这是符文还是卡"
+		FLinearColor Col = ColText;
+		FString Kind;
+		switch (R.Kind)
+		{
+		case FHexRewardOption::EKind::Rune:
+			Kind = TEXT("符文");
+			Col = FLinearColor(0.75f, 0.60f, 0.95f);
+			break;
+		case FHexRewardOption::EKind::Card:
+			Kind = TEXT("卡牌");
+			Col = FLinearColor(0.60f, 0.80f, 0.95f);
+			break;
+		case FHexRewardOption::EKind::Equip:
+			Kind = TEXT("装备");
+			Col = FLinearColor(0.95f, 0.80f, 0.55f);
+			break;
+		case FHexRewardOption::EKind::DeckCapacity:
+			Kind = TEXT("卡组容量");
+			Col = ColGood;
+			break;
+		case FHexRewardOption::EKind::Shards:
+			Kind = TEXT("碎片");
+			Col = FLinearColor(0.70f, 0.90f, 0.70f);
+			break;
+		default:
+			Kind = TEXT("奖励");
+			break;
+		}
+
+		DrawTextShadowed(
+			FString::Printf(TEXT("[%d] %s · %s"), I + 1, *Kind, *R.DisplayName),
+			X + 18.0f, RowY, Col, 1.05f);
+
+		// ⚠️ 必须显示机制说明（R8）：符文看不懂就无法推理组合，
+		//    D6 的价值直接归零。GenerateFloorRewards 已经刻意用
+		//    MechanicText 而非 FlavorText 填这个字段。
+		if (!R.Description.IsEmpty())
+		{
+			const int32 MaxChars = 46;
+			FString Rest = R.Description;
+			float DescY = RowY + 22.0f;
+			int32 Lines = 0;
+			while (!Rest.IsEmpty() && Lines < 2)
+			{
+				const int32 Take = FMath::Min(MaxChars, Rest.Len());
+				DrawTextShadowed(Rest.Left(Take), X + 40.0f, DescY,
+					FLinearColor(0.78f, 0.80f, 0.84f), 0.86f);
+				Rest = Rest.RightChop(Take);
+				DescY += 16.0f;
+				++Lines;
+			}
+		}
+
+		RowY += 56.0f;
+	}
+
+	// ── 当前 6 槽（§6.6 要求：三选一界面下方显示当前槽位）
+	//
+	// ⚠️ 这不是装饰。满槽时新符文会进背包而不是自动装上，
+	//    玩家必须先看到"我的 6 槽已经满了、分别是什么"，
+	//    才能判断这个新符文值不值得替换掉某一个。
+	RowY += 10.0f;
+	DrawTextShadowed(TEXT("当前符文（结算顺序 →）"), X + 18.0f, RowY, ColDim);
+	RowY += 22.0f;
+
+	FString Slots;
+	for (int32 I = 0; I < FHexRuneLoadout::SlotCount; ++I)
+	{
+		const FHexRuneData* R = Run->RuneLoadout.GetSlot(I);
+		Slots += R
+			? FString::Printf(TEXT("%d.%s  "), I + 1, *R->DisplayName)
+			: FString::Printf(TEXT("%d.—  "), I + 1);
+	}
+	DrawTextShadowed(Slots, X + 30.0f, RowY, ColText, 0.92f);
+
+	if (Run->RuneInventory.Num() > 0)
+	{
+		RowY += 22.0f;
+		DrawTextShadowed(
+			FString::Printf(TEXT("背包中未装备：%d 个（槽位满时新符文会先进背包）"),
+				Run->RuneInventory.Num()),
+			X + 30.0f, RowY, ColWarn, 0.88f);
+	}
+}
+
 // ══════════════════════════════════════════════════════════ 图例与帮助
 
 void AHexDemoHUD::DrawLegend()
@@ -726,9 +853,19 @@ void AHexDemoHUD::DrawLegend()
 
 void AHexDemoHUD::DrawHelp(AHexDemoGameMode* Mode)
 {
-	const FString Help = Mode->IsInBattle()
-		? TEXT("数字键选手牌 · QWE(或点击)选固定卡 · 左键点黄格出牌 · 右键取消 · 空格(或点右下角印章)结束回合 · Tab 看牌堆 · R 重开")
-		: TEXT("数字键选择房间 · Enter 确认 · R 重开一局");
+	FString Help;
+	if (Mode->IsAwaitingRewardChoice())
+	{
+		// 层结算阶段的键位与地图阶段不同，必须单独说明 ——
+		// 否则玩家会按 Enter 等"确认"，而那个键在这里没有绑定。
+		Help = TEXT("层结算：数字键选择奖励 · 0 键全部放弃 · 选完才能进下一间房");
+	}
+	else
+	{
+		Help = Mode->IsInBattle()
+			? TEXT("数字键选手牌 · QWE(或点击)选固定卡 · 左键点黄格出牌 · 右键取消 · 空格(或点右下角印章)结束回合 · Tab 看牌堆 · R 重开")
+			: TEXT("数字键选择房间 · Enter 确认 · R 重开一局");
+	}
 
 	// ⚠️ 提示行原本贴在手牌上方(SizeY-158)。固定卡区在左侧，
 	//    两者不重叠，位置不用动。

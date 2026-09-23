@@ -30,6 +30,12 @@ struct HEXSPIRECORE_API FHexEffectCondition
 		TargetHPBelowPercent,
 		/** 自身生命满 */
 		SelfAtFullHP,
+		/**
+		 * 自身生命未满。
+		 * ⚠️ 不是 SelfAtFullHP 的简单取反用法问题 ——
+		 *    条件系统没有"否"运算符，"低血反打"类符文必须有独立枚举。
+		 */
+		SelfNotAtFullHP,
 		/** 抽牌堆为空 */
 		DrawPileEmpty,
 		/** 目标有指定状态 */

@@ -394,6 +394,94 @@ bool FHexRunState::ApplyReward(const FHexRewardOption& Option, FHexRngStreams& R
 	}
 }
 
+// ══════════════════════════════════════════════════════════ 符文装备（§6.6）
+
+bool FHexRunState::EquipRuneFromInventory(FName RuneId, int32 SlotIndex)
+{
+	// ⚠️ 锁检查放在最前：战斗中改符文会让 §6.5 的顺序决策
+	//    退化成"每次出牌前先排一遍"。
+	if (bRuneLayoutLocked)
+	{
+		return false;
+	}
+	if (SlotIndex < 0 || SlotIndex >= FHexRuneLoadout::SlotCount)
+	{
+		return false;
+	}
+
+	const int32 InvIndex = RuneInventory.IndexOfByKey(RuneId);
+	if (InvIndex == INDEX_NONE)
+	{
+		return false;
+	}
+
+	const FHexRuneData* Rune = FHexRuneLibrary::FindRune(RuneId);
+	if (!Rune)
+	{
+		// 背包里有 id 但符文库查不到 —— 说明符文表改过名。
+		// 把这条坏数据清掉，否则玩家会一直看到一个装不上的幽灵符文。
+		RuneInventory.RemoveAt(InvIndex);
+		return false;
+	}
+
+	// ⚠️ 被替换下来的符文【直接销毁】，不回收进背包。
+	//    §6.6 原文："被覆盖的符文销毁，不可回收"。
+	//    这是"覆盖哪一个"这个决策的代价来源 ——
+	//    允许回收的话，玩家可以在 6 槽间无成本反复横跳试配，
+	//    §3.2 的取舍决策会完全消失。
+	RuneLoadout.SetSlot(SlotIndex, Rune);
+	RuneInventory.RemoveAt(InvIndex);
+	return true;
+}
+
+bool FHexRunState::UnequipRuneToInventory(int32 SlotIndex)
+{
+	if (bRuneLayoutLocked)
+	{
+		return false;
+	}
+	if (SlotIndex < 0 || SlotIndex >= FHexRuneLoadout::SlotCount)
+	{
+		return false;
+	}
+
+	const FHexRuneData* Rune = RuneLoadout.GetSlot(SlotIndex);
+	if (!Rune)
+	{
+		return false;
+	}
+
+	// ⚠️ 与"替换"不同，主动卸下【允许】回背包。
+	//    替换销毁是因为"三选一必须付代价"；
+	//    主动整理没有获得任何新东西，再惩罚就只是添堵。
+	RuneLoadout.ClearSlot(SlotIndex);
+	RuneInventory.AddUnique(Rune->Id);
+	return true;
+}
+
+bool FHexRunState::ReorderRune(int32 SlotA, int32 SlotB)
+{
+	if (bRuneLayoutLocked)
+	{
+		return false;
+	}
+	if (SlotA < 0 || SlotA >= FHexRuneLoadout::SlotCount
+		|| SlotB < 0 || SlotB >= FHexRuneLoadout::SlotCount)
+	{
+		return false;
+	}
+	if (SlotA == SlotB)
+	{
+		// 不算失败，只是无操作
+		return true;
+	}
+
+	// ⚠️ 允许含空槽的交换：把符文往前挪（让它先结算）是常见操作，
+	//    要求两端都非空会让"挪到空位"变得不可能。
+	RuneLoadout.SwapSlots(SlotA, SlotB);
+	return true;
+}
+
 // ══════════════════════════════════════════════════════════ 序列化
 
 void FHexRunState::Serialize(FArchive& Ar)

@@ -129,6 +129,52 @@ void AHexDemoGameMode::StartPlay()
 			UE_LOG(LogHexSpire, Error, TEXT("[自检] 没有可进入的房间"));
 		}
 	}
+
+	// ── 自检开关：-HexAutoReward
+	//
+	// ⚠️ 层结算三选一是【获得符文的唯一途径】，但它在自动化里
+	//    一次都跑不到：试玩机器人击败 Boss 的比率是 0%，
+	//    所以那段代码从未被执行过（"PASS" 只是因为没走到）。
+	//    这个开关直接把局面推到层结算，让整条链路可被命令行验证：
+	//      生成选项 → 显示面板 → 选择 → 真的装进槽位
+	if (FParse::Param(FCommandLine::Get(), TEXT("HexAutoReward")))
+	{
+		RunState->GenerateFloorRewards(*Rng, PendingRewards);
+		bAwaitingRewardChoice = PendingRewards.Num() > 0;
+
+		UE_LOG(LogHexSpire, Display,
+			TEXT("[自检] 层结算奖励 %d 项"), PendingRewards.Num());
+		for (int32 I = 0; I < PendingRewards.Num(); ++I)
+		{
+			UE_LOG(LogHexSpire, Display, TEXT("[自检]   [%d] %s"),
+				I + 1, *PendingRewards[I].DisplayName);
+		}
+
+		// ⚠️ 默认【只生成、不选择】，让奖励面板停在屏幕上 ——
+		//    否则截图抓到的是选完之后的房间列表，看不到面板本身。
+		//    要验证"选择"这一步，加 -HexAutoRewardPick。
+		if (FParse::Param(FCommandLine::Get(), TEXT("HexAutoRewardPick")))
+		{
+			for (int32 I = 0; I < PendingRewards.Num(); ++I)
+			{
+				if (PendingRewards[I].Kind == FHexRewardOption::EKind::Rune)
+				{
+					const int32 Before = RunState->RuneLoadout.GetFilledCount();
+					ChooseReward(I);
+					UE_LOG(LogHexSpire, Display,
+						TEXT("[自检] 选择奖励后：槽位 %d → %d，背包 %d 个"),
+						Before, RunState->RuneLoadout.GetFilledCount(),
+						RunState->RuneInventory.Num());
+					break;
+				}
+			}
+		}
+		else
+		{
+			UE_LOG(LogHexSpire, Display,
+				TEXT("[自检] 保留待选状态（加 -HexAutoRewardPick 可自动选择）"));
+		}
+	}
 }
 
 void AHexDemoGameMode::SetupCamera()
@@ -281,6 +327,16 @@ bool AHexDemoGameMode::EnterRoom(int32 RoomId)
 {
 	if (!RunState || bInBattle)
 	{
+		return false;
+	}
+
+	// ⚠️ 层结算未处理完不许进下一间房。
+	//    不拦的话玩家直接点房间就把奖励绕过去了 ——
+	//    而层结算三选一是获得符文的唯一途径，
+	//    绕过一次就等于永久少一个符文，且没有任何提示。
+	if (bAwaitingRewardChoice)
+	{
+		StatusMessage = TEXT("请先选择本层奖励（数字键选择，0 放弃）");
 		return false;
 	}
 
@@ -489,6 +545,12 @@ void AHexDemoGameMode::BeginBattleForRoom(int32 RoomId)
 	bInBattle = true;
 	SelectedCardUid = 0;
 
+	// ⚠️ 战斗中锁定符文重排（§6.5）。
+	//    不锁的话玩家可以每次出牌前重排一遍去找最优顺序，
+	//    "顺序即策略"就退化成"每回合手动最优化"，
+	//    既破坏节奏也让符文顺序失去决策意义。
+	RunState->bRuneLayoutLocked = true;
+
 	// 地形重建 + 单位生成
 	ClearUnitVisuals();
 	if (Board)
@@ -500,6 +562,11 @@ void AHexDemoGameMode::BeginBattleForRoom(int32 RoomId)
 	const FString RoomName = (Room->Type == EHexRoomType::Boss)
 		? TEXT("BOSS 战")
 		: (Room->Type == EHexRoomType::Elite ? TEXT("精英战") : TEXT("战斗"));
+
+	// ⚠️ 必须在这里记下房间类型。
+	//    战斗结束时房间已被标记 Cleared，那时再查会判不出"刚打的是 Boss"，
+	//    层结算就永远不会触发（而且不报错）。
+	CurrentRoomType = Room->Type;
 
 	StatusMessage = FString::Printf(
 		TEXT("%s 开始！腐蚀度 %d —— 数字键选手牌 / QWE 选左侧固定卡，再点目标格；空格结束回合"),
@@ -641,10 +708,28 @@ void AHexDemoGameMode::FinishBattleAndReturnToMap()
 	// ── 腐蚀度 + 统计
 	const int32 Delta = RunState->OnRoomCleared();
 
+	// ── 层结算：打赢 Boss → 生成三选一奖励（§6.6 / §9.8）
+	//
+	// ⚠️ 这一段原先【完全不存在】：GenerateFloorRewards 只被
+	//    试玩 commandlet 调用过（而且是无脑取 Rewards[0]）。
+	//    对真实玩家而言，打赢 Boss 拿不到任何符文 ——
+	//    符文系统做得再完整也没有入口，整个 D6 是死的。
+	{
+		const bool bWasBoss = (CurrentRoomType == EHexRoomType::Boss);
+		if (bWasBoss)
+		{
+			RunState->GenerateFloorRewards(*Rng, PendingRewards);
+			bAwaitingRewardChoice = PendingRewards.Num() > 0;
+		}
+	}
+
 	bInBattle = false;
 	BattleFlow.Reset();
 	BattleState.Reset();
 	ClearUnitVisuals();
+
+	// 回到地图 → 解锁符文重排（§6.5 战斗外自由）
+	RunState->bRuneLayoutLocked = false;
 
 	if (Board)
 	{
@@ -652,9 +737,75 @@ void AHexDemoGameMode::FinishBattleAndReturnToMap()
 		Board->CommitHighlights();
 	}
 
-	StatusMessage = FString::Printf(
-		TEXT("清空！腐蚀度 +%d（现 %d）· 生命 %d/%d —— 选择下一间房"),
-		Delta, RunState->Corruption, RunState->HeroHP, RunState->HeroHPMax);
+	if (bAwaitingRewardChoice)
+	{
+		StatusMessage = FString::Printf(
+			TEXT("★ BOSS 已倒下！层结算 —— 按数字键选择一项奖励（共 %d 项），按 0 全部放弃"),
+			PendingRewards.Num());
+	}
+	else
+	{
+		StatusMessage = FString::Printf(
+			TEXT("清空！腐蚀度 +%d（现 %d）· 生命 %d/%d —— 选择下一间房"),
+			Delta, RunState->Corruption, RunState->HeroHP, RunState->HeroHPMax);
+	}
+}
+
+// ══════════════════════════════════════════════════════════ 层结算
+
+void AHexDemoGameMode::ChooseReward(int32 Index)
+{
+	if (!bAwaitingRewardChoice || !RunState)
+	{
+		return;
+	}
+
+	if (!PendingRewards.IsValidIndex(Index))
+	{
+		DeclineRewards();
+		return;
+	}
+
+	const FHexRewardOption Chosen = PendingRewards[Index];
+	const bool bOk = RunState->ApplyReward(Chosen, *Rng);
+
+	PendingRewards.Reset();
+	bAwaitingRewardChoice = false;
+
+	if (!bOk)
+	{
+		StatusMessage = TEXT("那项奖励无法应用（可能卡组已满）—— 已跳过");
+		return;
+	}
+
+	// ⚠️ 符文奖励在满槽时会进背包而不是直接装上（ApplyReward 的语义）。
+	//    必须告诉玩家这件事，否则他会以为奖励丢了 ——
+	//    §6.6 要求"三选一界面下方显示当前 6 槽让玩家指定覆盖目标"，
+	//    第一版先用文字说明 + EquipRuneFromInventory 供后续 UI 调用。
+	if (Chosen.Kind == FHexRewardOption::EKind::Rune)
+	{
+		const bool bInBag = RunState->RuneInventory.Contains(Chosen.ContentId);
+		StatusMessage = bInBag
+			? FString::Printf(
+				TEXT("获得符文《%s》—— 6 槽已满，已放入背包（需替换某个槽位才能生效）"),
+				*Chosen.DisplayName)
+			: FString::Printf(TEXT("获得符文《%s》，已装入空槽"), *Chosen.DisplayName);
+	}
+	else
+	{
+		StatusMessage = FString::Printf(TEXT("已获得：%s"), *Chosen.DisplayName);
+	}
+}
+
+void AHexDemoGameMode::DeclineRewards()
+{
+	if (!bAwaitingRewardChoice)
+	{
+		return;
+	}
+	PendingRewards.Reset();
+	bAwaitingRewardChoice = false;
+	StatusMessage = TEXT("已放弃本层奖励 —— 选择下一间房");
 }
 
 // ══════════════════════════════════════════════════════════ 选择与高亮

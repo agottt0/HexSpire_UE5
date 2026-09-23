@@ -130,6 +130,26 @@ namespace HexK
 	/** 单次 ResolveAll 的动作总数上限。死循环硬闸。 */
 	inline constexpr int32 MaxActionsPerResolve = 2000;
 
+	/**
+	 * 单次 ResolveAll 内，由「动作 → 触发时机」翻译产生的 Emit 次数上限。
+	 *
+	 * ⚠️ 这条是【必须补的】，MaxTriggerDepth 盖不住这个洞：
+	 *    Depth 只在 Emit 的调用栈内有效，Emit 一返回就归零。
+	 *    而符文效果是先 PushNext 成动作、稍后才执行的，所以
+	 *      「符文造成伤害 → 伤害动作执行 → 翻译出 OnDamageDealt
+	 *        → 同一符文再次触发 → 又造成伤害」
+	 *    这条链上每次 Emit 都是 Depth=0，深度闸【一次都不会命中】。
+	 *
+	 *    没有这条预算时，一个「监听 OnDamageDealt 且造成伤害」的符文
+	 *    会一路刷到 MaxActionsPerResolve(2000)，
+	 *    表面症状是 action_overflow + 战斗中止，真凶却是符文自激 ——
+	 *    而这种符文将来一定会有人写（"受击反伤"是最常见的符文形态）。
+	 *
+	 *    256 的取值：正常连锁（一次攻击触发三四个符文、每个派生
+	 *    一两个动作）远低于此；自激循环几十次内就会撞线。
+	 */
+	inline constexpr int32 MaxObserverEmitsPerResolve = 256;
+
 	/** BattleSim 单场回合上限，超过计入 timeout */
 	inline constexpr int32 MaxRoundsPerBattle = 50;
 

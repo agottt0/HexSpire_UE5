@@ -107,6 +107,18 @@ public:
 	int32 ListenerCountFor(EHexTriggerTiming Timing) const;
 
 	/**
+	 * 某时机被 Emit 过多少次（本场累计）。
+	 *
+	 * ⚠️ 这不是调试摆设，而是【埋点覆盖率验证的唯一依据】。
+	 *    "某个时机没人埋点"这种缺陷没有任何运行时症状 ——
+	 *    符文只是安静地不生效。手动调 Emit 的测试也发现不了，
+	 *    因为它自己就是那个调用方。
+	 *    只有"跑真实战斗，然后数这个计数"才能抓住。
+	 *    实测曾有 10/22 个时机为 0，导致 3 个符文完全失效。
+	 */
+	int32 GetEmitCount(EHexTriggerTiming Timing) const;
+
+	/**
 	 * 调试：完整触发链。
 	 * 服务 §13.3 的「符文实验室」UI —— 这是 R8（符文看不懂）的解药。
 	 */
@@ -125,10 +137,31 @@ private:
 	bool CanFire(const FHexTriggerListener& L) const;
 	void MarkFired(const FHexTriggerListener& L);
 
+	/**
+	 * 处理 CounterThreshold：累加并判断是否攒够。
+	 * @return true 表示本次应当产生效果（并已清零计数）
+	 */
+	bool AdvanceCounter(const FHexTriggerListener& L);
+
 	static FString CountKey(const FHexTriggerListener& L);
 
 	TArray<FHexTriggerListener> Listeners;
 	TMap<FString, int32> RoundCounts;
 	TMap<FString, int32> BattleCounts;
+
+	/**
+	 * "每 N 次触发一次"的累积计数（键同 CountKey）。
+	 * ⚠️ 跨回合保留：玩家攒到 2/3 时回合结束，不该被清零 ——
+	 *    否则"每移动 3 格"在回合边界附近会变得无法预测。
+	 */
+	TMap<FString, int32> ThresholdCounts;
+
 	int32 Depth = 0;
+
+	/**
+	 * 每个时机被 Emit 的累计次数。
+	 * ⚠️ 刻意【不】随回合重置：它要回答的是"这个时机在整场战斗里
+	 *    到底有没有被派发过一次"，回合级重置会让答案失真。
+	 */
+	int32 EmitCounts[static_cast<int32>(EHexTriggerTiming::Count)] = {};
 };

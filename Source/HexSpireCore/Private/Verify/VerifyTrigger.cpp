@@ -18,7 +18,10 @@
 #include "Battle/HexTriggerBus.h"
 #include "Battle/HexEnemyAI.h"
 #include "Battle/HexBattleState.h"
+#include "Battle/HexBattleFlow.h"
+#include "Battle/HexRuleBook.h"
 #include "Battle/HexGameAction.h"
+#include "Deck/HexPileManager.h"
 #include "Battle/HexUnit.h"
 #include "Battle/HexStatusData.h"
 #include "Content/HexContentLibrary.h"
@@ -412,6 +415,657 @@ namespace
 					B2.MakeValueHook(EHexTriggerTiming::OnAttack, S2, C2);
 				Ctx.Check(TEXT("无符文时钩子为空"),
 					!static_cast<bool>(Empty), TEXT(""));
+			}
+		}
+	}
+
+	// ═══════════════════════════════════════════ 埋点覆盖率（§6.3）
+	//
+	// ══════════════════════════════════════════════════════════════
+	// 为什么必须有这一节：1049 项断言全绿，却有 3 个符文是死的
+	// ══════════════════════════════════════════════════════════════
+	// 已有的 R7 暴力测试是【手动调 Bus.Emit】的，所以它只能证明
+	// "总线收到时机后行为正确"，完全无法发现"生产代码从来不调它"。
+	//
+	// 实测：22 个时机里只有 11 个真的被 HexBattleFlow 派发过。
+	// 后果是《食魂》(OnKill)、《焚心》(OnCrit)、《轮回护符》
+	// (OnDeckReshuffled) 装上去毫无效果 —— 不报错、不崩溃，
+	// 只显得"这符文很弱"。策划案 §6.3 的示范组合也无法成立。
+	//
+	// 所以这里【不手动 Emit】，而是跑真实战斗流程，
+	// 看哪些时机自己冒出来。这是唯一能抓住"没人埋点"的方式。
+
+	/** 记录某个时机是否被真实派发过 */
+	struct FTimingProbe
+	{
+		/** 一个必然触发、且效果无害的探针符文触发器 */
+		static FHexRuneTrigger MakeProbe(EHexTriggerTiming When)
+		{
+			FHexRuneTrigger T;
+			T.When = When;
+			// 效果选「获得 0 点格挡」：合法、可结算、但数值为 0，
+			// 不会污染被测战斗的平衡。
+			// （刻意不用伤害类效果 —— 那会让探针自己触发 OnDamageDealt，
+			//   把"这个时机有没有埋点"的结论污染成自问自答。）
+			T.Effects = { FHexEffectStep::MakeBlock(0.0f, NAME_None, 0.0f) };
+			T.MaxPerRound = -1;
+			T.MaxPerBattle = -1;
+			return T;
+		}
+	};
+
+	/** 时机 → 可读名（断言消息里必须有名字，裸数字无法排查） */
+	const TCHAR* TimingName(EHexTriggerTiming T)
+	{
+		switch (T)
+		{
+		case EHexTriggerTiming::OnBattleStart:    return TEXT("OnBattleStart");
+		case EHexTriggerTiming::OnRoundStart:     return TEXT("OnRoundStart");
+		case EHexTriggerTiming::OnRoundEnd:       return TEXT("OnRoundEnd");
+		case EHexTriggerTiming::OnCardPlayed:     return TEXT("OnCardPlayed");
+		case EHexTriggerTiming::OnAttack:         return TEXT("OnAttack");
+		case EHexTriggerTiming::OnDamageDealt:    return TEXT("OnDamageDealt");
+		case EHexTriggerTiming::OnDamageTaken:    return TEXT("OnDamageTaken");
+		case EHexTriggerTiming::OnKill:           return TEXT("OnKill");
+		case EHexTriggerTiming::OnBlockGained:    return TEXT("OnBlockGained");
+		case EHexTriggerTiming::OnBlockBroken:    return TEXT("OnBlockBroken");
+		case EHexTriggerTiming::OnMoveSelf:       return TEXT("OnMoveSelf");
+		case EHexTriggerTiming::OnMoveEnemy:      return TEXT("OnMoveEnemy");
+		case EHexTriggerTiming::OnStatusApplied:  return TEXT("OnStatusApplied");
+		case EHexTriggerTiming::OnCardDrawn:      return TEXT("OnCardDrawn");
+		case EHexTriggerTiming::OnCardDiscarded:  return TEXT("OnCardDiscarded");
+		case EHexTriggerTiming::OnCardExhausted:  return TEXT("OnCardExhausted");
+		case EHexTriggerTiming::OnDeckReshuffled: return TEXT("OnDeckReshuffled");
+		case EHexTriggerTiming::OnEnergyLeftover: return TEXT("OnEnergyLeftover");
+		case EHexTriggerTiming::OnCrit:           return TEXT("OnCrit");
+		case EHexTriggerTiming::OnDodge:          return TEXT("OnDodge");
+		case EHexTriggerTiming::OnUnitDeath:      return TEXT("OnUnitDeath");
+		case EHexTriggerTiming::OnBattleWin:      return TEXT("OnBattleWin");
+		default:                                  return TEXT("?");
+		}
+	}
+
+	void CheckTimingCoverage(FHexVerifyContext& Ctx)
+	{
+		Ctx.Section(TEXT("触发时机埋点覆盖率（§6.3）"));
+
+		// ── 哪些时机【不】由本探针战斗产生，属于合理豁免
+		//
+		// ⚠️ 这张豁免表是白名单，加东西必须写理由。
+		//    把"暂时没实现"的时机塞进来就等于把缺陷合法化 ——
+		//    那正是这一节要防的事。
+		//
+		// ⚠️ 必须用【枚举名】而不是数字写这张表。
+		//    第一版我按记忆写成了数字，把 OnBlockBroken 记成 8
+		//    （实际是 9）、OnCardExhausted 记成 14（实际是 15），
+		//    结果豁免全打偏：真正该豁免的在被测，该被测的被豁免了。
+		auto IsExempt = [](EHexTriggerTiming T) -> const TCHAR*
+		{
+			switch (T)
+			{
+			case EHexTriggerTiming::OnAttack:
+				// ②′ 数值钩子，走 MakeValueHook 而非 Emit（设计如此）
+				return TEXT("②′数值钩子，不走 Emit");
+			case EHexTriggerTiming::OnBattleWin:
+				// 需要打赢整场，本探针战斗只跑固定回合数
+				return TEXT("需完整胜局");
+			case EHexTriggerTiming::OnDodge:
+				// 闪避是概率事件，固定种子下不保证出现
+				return TEXT("概率事件");
+			case EHexTriggerTiming::OnCardExhausted:
+				// 需要消耗类卡或 ExhaustAllAttacks 规则，探针卡组里没有
+				return TEXT("需消耗类卡");
+			case EHexTriggerTiming::OnBlockBroken:
+				// 需要敌人正好打穿玩家格挡，回合数不足时可能不发生
+				return TEXT("需格挡被打穿");
+			default:
+				return nullptr;
+			}
+		};
+
+		// ── 逐个时机装一个探针符文，跑真实战斗，看它有没有被触发
+		for (int32 TI = 0; TI < static_cast<int32>(EHexTriggerTiming::Count); ++TI)
+		{
+			const EHexTriggerTiming Timing = static_cast<EHexTriggerTiming>(TI);
+			const TCHAR* ExemptReason = IsExempt(Timing);
+
+			// 造一个只挂这一个时机的临时符文
+			FHexRuneData Probe;
+			Probe.Id = FName(*FString::Printf(TEXT("__probe_%d"), TI));
+			Probe.DisplayName = TEXT("探针");
+			Probe.Triggers = { FTimingProbe::MakeProbe(Timing) };
+
+			// ⚠️ 多种子重试。
+			//    有些链路仍带随机性（闪避/暴击的 roll、敌人 AI 选择），
+			//    单一种子下"没触发"可能只是这一局没赶上。
+			//    只要【任一】种子触发过，就证明埋点存在 ——
+			//    这正是本断言要回答的问题。
+			//    反过来，全部种子都没触发才判失败，避免假红。
+			int32 TotalFired = 0;
+
+			for (int32 Seed = 0; Seed < 6 && TotalFired == 0; ++Seed)
+			{
+				FHexBattleState State(1000 + TI * 10 + Seed);
+
+				// ⚠️ 敌人必须放在英雄【紧邻格】。
+				//    英雄出生在 (4,1)，而默认的 (4,6) 隔着 5 行 ——
+				//    《盾击》射程是 1-1（必须贴身），整场都打不出来，
+				//    于是它自带的击退效果永远不发生，OnMoveEnemy 测不到。
+				//    这不是埋点缺陷，而是探针没把场景摆对。
+				FHexLayouts::Build(TEXT("open_hall"), State.Grid);
+				SpawnHero(State);
+				const int32 FrailId = SpawnEnemy(
+					State, TEXT("biting_hound"), HexK::HeroSpawnCol, HexK::HeroSpawnRow + 1);
+				SpawnEnemy(
+					State, TEXT("biting_hound"), HexK::HeroSpawnCol + 1, HexK::HeroSpawnRow + 1);
+				State.RebuildOccupancy();
+
+				// ⚠️ SetupBattle 只搭网格与单位，【不】初始化牌堆 ——
+				//    它是给"手动 Emit"的断言用的，那些不需要卡。
+				//    这里必须自己备牌，否则手牌恒空、一张牌都打不出来，
+				//    于是连 OnCardPlayed / OnBlockGained 这些【已有埋点】
+				//    的时机也测不到，结论会变成一片假失败。
+				//    （第一版就踩了这个坑，13 项失败里有一半是假的。）
+				const FHexHeroData* HeroData = FHexContentLibrary::FindHero(TEXT("warden"));
+				if (HeroData)
+				{
+					TArray<FHexCardInstance> Deck;
+					FHexContentLibrary::BuildStartingDeck(*HeroData, Deck, State.FixedCards);
+					State.Piles.BeginBattle(Deck, State.Rng);
+					State.HeroEnergyMaxBase = HeroData->EnergyMax;
+					State.HeroDrawBase = HeroData->CardsDrawnPerTurn;
+					State.HeroPassiveRules = HeroData->PassiveRules;
+				}
+
+				State.RuneLoadout.SetSlot(0, &Probe);
+				State.RebuildRuleAggregate();
+
+				// ⚠️ 暴击率拉满：OnCrit 原本靠运气，
+				//    换个敌人位置就会因为随机流不同而时通时不通 ——
+				//    那样断言的红绿取决于种子，毫无意义。
+				//    把 CRIT 设成 100 让暴击成为必然事件。
+				if (FHexUnit* Hero = State.GetHero())
+				{
+					Hero->CRIT = 100;
+				}
+
+				// ⚠️ 只削这一只，另一只留满血。
+				//    《盾击》是"先伤害、再击退"：若场上唯一的敌人只有 1 HP，
+				//    它会被伤害步骤当场打死，击退步骤的 AffectedUnits
+				//    就筛不到存活目标 —— OnMoveEnemy 又测不到了。
+				//    留一只满血的，击杀与推拉才能同时发生。
+				//
+				//    削血本身的目的：OnKill / OnUnitDeath 只有真打死才触发，
+				//    而探针只跑几回合、机器人式出牌未必打得死 24 HP 的狗。
+				if (FHexUnit* Frail = State.FindUnit(FrailId))
+				{
+					Frail->HP = 1;
+				}
+
+				FHexBattleFlow Flow(State);
+				Flow.SetCardLookup([](FName Id) { return FHexContentLibrary::FindCard(Id); });
+				Flow.BeginBattle();
+
+				// 打几张牌 + 过几个回合，尽量覆盖到各条链路
+				for (int32 R = 0; R < 4 && !Flow.IsBattleOver(); ++R)
+				{
+					// 手牌与固定卡都试着往敌人身上招呼
+					TArray<FHexCardInstance> Playable = State.Piles.GetHand();
+					Playable.Append(State.FixedCards);
+
+					for (const FHexCardInstance& C : Playable)
+					{
+						if (!Flow.CanPlayCard(C.Uid))
+						{
+							continue;
+						}
+						TArray<FIntVector> Targets;
+						Flow.GetLegalTargets(C.Uid, Targets);
+						if (Targets.Num() == 0)
+						{
+							continue;
+						}
+
+						// 优先打在敌人身上，否则打第一个合法格
+						FIntVector Pick = Targets[0];
+						for (const FIntVector& T : Targets)
+						{
+							const FHexUnit* U = State.FindUnitAtCell(T);
+							if (U && U->Team == EHexTeam::Enemy && U->bIsAlive)
+							{
+								Pick = T;
+								break;
+							}
+						}
+						Flow.PlayCard(C.Uid, Pick);
+					}
+
+					Flow.EndPlayerTurn();
+				}
+
+				TotalFired += Flow.GetTimingFireCount(Timing);
+			}
+
+			if (ExemptReason)
+			{
+				// 豁免项不强制，但如果它居然触发了，说明豁免理由已过期 ——
+				// 这是好事，提示可以把它移出白名单。
+				Ctx.Check(FString::Printf(TEXT("[豁免] %s（%s）"),
+					TimingName(Timing), ExemptReason), true, TEXT(""));
+				continue;
+			}
+
+			Ctx.Check(
+				FString::Printf(TEXT("%s 能被战斗流程真实派发"), TimingName(Timing)),
+				TotalFired > 0,
+				FString::Printf(
+					TEXT("6 个种子的战斗中 %s 一次都没被 Emit —— ")
+					TEXT("挂在它上面的符文会【静默失效】（装上去毫无效果也不报错）。")
+					TEXT("请在 HexBattleFlow 补埋点，或加入豁免白名单并写明理由。"),
+					TimingName(Timing)));
+		}
+	}
+
+	// ═══════════════════════════════════════════ 符文端到端生效
+	//
+	// ══════════════════════════════════════════════════════════════
+	// 为什么覆盖率断言还不够，必须再有这一节
+	// ══════════════════════════════════════════════════════════════
+	// CheckTimingCoverage 证明的是「时机被派发了」，
+	// 但"派发了"离"符文真的产生效果"还差好几步：
+	// 过滤器、条件、限次、EffectOp 是否被 TriggerBus 实现……
+	// 任何一环断掉，符文依然是哑的，而覆盖率断言照样全绿。
+	//
+	// 所以这三个符文（P0 缺陷的原始受害者）必须有【看结果】的断言：
+	//   《食魂》    OnKill           → 手牌真的多了一张
+	//   《焚心》    OnCrit           → 目标真的挂上了燃烧
+	//   《轮回护符》OnDeckReshuffled → 真的拿到了格挡
+	// 它们是防止同类缺陷复发的最后一道防线。
+
+	/** 备好牌堆与英雄基线的战场（端到端测试用） */
+	void SetupFullBattle(FHexBattleState& State, int32 EnemyCol, int32 EnemyRow)
+	{
+		FHexLayouts::Build(TEXT("open_hall"), State.Grid);
+		SpawnHero(State);
+		SpawnEnemy(State, TEXT("biting_hound"), EnemyCol, EnemyRow);
+		State.RebuildOccupancy();
+
+		if (const FHexHeroData* H = FHexContentLibrary::FindHero(TEXT("warden")))
+		{
+			TArray<FHexCardInstance> Deck;
+			FHexContentLibrary::BuildStartingDeck(*H, Deck, State.FixedCards);
+			State.Piles.BeginBattle(Deck, State.Rng);
+			State.HeroEnergyMaxBase = H->EnergyMax;
+			State.HeroDrawBase = H->CardsDrawnPerTurn;
+			State.HeroPassiveRules = H->PassiveRules;
+		}
+		State.RebuildRuleAggregate();
+	}
+
+	void CheckRuneEndToEnd(FHexVerifyContext& Ctx)
+	{
+		Ctx.Section(TEXT("符文端到端生效（P0 回归防线）"));
+
+		// ── 《食魂》：击杀 → 抽 1 张
+		{
+			FHexBattleState State(7001);
+			SetupFullBattle(State, HexK::HeroSpawnCol, HexK::HeroSpawnRow + 1);
+			State.RuneLoadout.SetSlot(0,
+				FHexRuneLibrary::FindRune(TEXT("rune_soul_eater")));
+			State.RebuildRuleAggregate();
+
+			// 敌人削到 1 HP，保证这一击必杀
+			for (FHexUnit& U : State.GetUnitsMutable())
+			{
+				if (U.Team == EHexTeam::Enemy) { U.HP = 1; }
+			}
+
+			FHexBattleFlow Flow(State);
+			Flow.SetCardLookup([](FName Id) { return FHexContentLibrary::FindCard(Id); });
+			Flow.BeginBattle();
+
+			const int32 HandBefore = State.Piles.NumHand();
+
+			// 用固定卡《盾击》贴身击杀
+			bool bKilled = false;
+			for (const FHexCardInstance& C : State.FixedCards)
+			{
+				const FHexCardData* Card = FHexContentLibrary::FindCard(C.CardId);
+				if (!Card || Card->CardType != EHexCardType::Attack) { continue; }
+
+				TArray<FIntVector> Targets;
+				Flow.GetLegalTargets(C.Uid, Targets);
+				for (const FIntVector& T : Targets)
+				{
+					const FHexUnit* U = State.FindUnitAtCell(T);
+					if (U && U->Team == EHexTeam::Enemy && U->bIsAlive)
+					{
+						bKilled = (Flow.PlayCard(C.Uid, T) == EHexPlayResult::Success);
+						break;
+					}
+				}
+				if (bKilled) { break; }
+			}
+
+			Ctx.Check(TEXT("《食魂》前置：成功击杀敌人"), bKilled,
+				TEXT("没打出击杀 → 本断言无从检验，请检查场景摆放"));
+
+			if (bKilled)
+			{
+				// 打出 1 张（手牌 -1）+ 符文抽 1 张（手牌 +1）→ 净变化 -1+1 = 0
+				// 若符文没生效，手牌会是 HandBefore-1。
+				Ctx.Check(TEXT("《食魂》击杀后真的抽到了牌"),
+					State.Piles.NumHand() >= HandBefore,
+					FString::Printf(
+						TEXT("手牌 %d → %d：击杀未补牌，说明 OnKill 链路断了"),
+						HandBefore, State.Piles.NumHand()));
+			}
+		}
+
+		// ── 《焚心》：暴击 → 施加 2 层燃烧
+		{
+			FHexBattleState State(7002);
+			SetupFullBattle(State, HexK::HeroSpawnCol, HexK::HeroSpawnRow + 1);
+			State.RuneLoadout.SetSlot(0,
+				FHexRuneLibrary::FindRune(TEXT("rune_heart_burn")));
+			State.RebuildRuleAggregate();
+
+			// 暴击拉满 + 敌人厚血（避免被打死后查不到状态）
+			if (FHexUnit* Hero = State.GetHero()) { Hero->CRIT = 100; }
+			for (FHexUnit& U : State.GetUnitsMutable())
+			{
+				if (U.Team == EHexTeam::Enemy) { U.HPMax = 500; U.HP = 500; }
+			}
+
+			FHexBattleFlow Flow(State);
+			Flow.SetCardLookup([](FName Id) { return FHexContentLibrary::FindCard(Id); });
+			Flow.BeginBattle();
+
+			int32 EnemyId = -1;
+			for (const FHexUnit& U : State.GetUnits())
+			{
+				if (U.Team == EHexTeam::Enemy) { EnemyId = U.Id; break; }
+			}
+
+			// 贴身攻击一次（必暴击）
+			for (const FHexCardInstance& C : State.FixedCards)
+			{
+				const FHexCardData* Card = FHexContentLibrary::FindCard(C.CardId);
+				if (!Card || Card->CardType != EHexCardType::Attack) { continue; }
+				TArray<FIntVector> Targets;
+				Flow.GetLegalTargets(C.Uid, Targets);
+				bool bDone = false;
+				for (const FIntVector& T : Targets)
+				{
+					const FHexUnit* U = State.FindUnitAtCell(T);
+					if (U && U->Team == EHexTeam::Enemy && U->bIsAlive)
+					{
+						bDone = (Flow.PlayCard(C.Uid, T) == EHexPlayResult::Success);
+						break;
+					}
+				}
+				if (bDone) { break; }
+			}
+
+			const FHexUnit* Enemy = State.FindUnit(EnemyId);
+			Ctx.Check(TEXT("《焚心》暴击后目标真的挂上了燃烧"),
+				Enemy && Enemy->GetStatusStacks(FHexStatusLibrary::Burn) > 0,
+				TEXT("暴击未施加燃烧 → OnCrit 链路断了，组合③（焚心+寻疵）无法成立"));
+		}
+
+		// ── 《轮回护符》：洗回卡组 → 获得格挡
+		{
+			FHexBattleState State(7003);
+			SetupFullBattle(State, HexK::HeroSpawnCol, HexK::HeroSpawnRow + 3);
+			State.RuneLoadout.SetSlot(0,
+				FHexRuneLibrary::FindRune(TEXT("rune_cycle_ward")));
+			State.RebuildRuleAggregate();
+
+			FHexBattleFlow Flow(State);
+			Flow.SetCardLookup([](FName Id) { return FHexContentLibrary::FindCard(Id); });
+			Flow.BeginBattle();
+
+			// ⚠️ 必须先把抽牌堆掏空，洗回才会发生。
+			//    卡组只有 5 张、每回合抽 3，所以过两个回合必然洗回。
+			int32 BlockGained = 0;
+			for (int32 R = 0; R < 4 && !Flow.IsBattleOver(); ++R)
+			{
+				Flow.EndPlayerTurn();
+				if (const FHexUnit* Hero = State.GetHero())
+				{
+					BlockGained = FMath::Max(BlockGained, Hero->Block);
+				}
+			}
+
+			Ctx.Check(TEXT("《轮回护符》洗回卡组后真的获得了格挡"),
+				BlockGained > 0,
+				TEXT("洗回未产生格挡 → OnDeckReshuffled 链路断了，"
+					 "组合①（薄刃契+轮回护符+空匣）无法成立"));
+		}
+	}
+
+	// ═══════════════════════════════════════════ 效果表达力（P1）
+
+	void CheckEffectExpressiveness(FHexVerifyContext& Ctx)
+	{
+		Ctx.Section(TEXT("符文效果表达力（P1）"));
+
+		// ── CounterThreshold：每 N 次才触发一次
+		//
+		// ⚠️ 这个字段原先【只声明、从未被读取】——
+		//    写了 CounterThreshold=3 的符文会每次都触发，
+		//    等于"每 3 次"的设计意图被静默忽略。
+		//    §6.3 的示例符文「你每移动 3 格，下一次攻击附加追击」
+		//    完全依赖它。
+		{
+			FHexBattleState State(7101);
+			SetupFullBattle(State, HexK::HeroSpawnCol, HexK::HeroSpawnRow + 2);
+
+			// 造一个"每 3 次回合开始才给 1 点格挡"的符文
+			FHexRuneData R;
+			R.Id = TEXT("__counter_probe");
+			R.DisplayName = TEXT("计数探针");
+			FHexRuneTrigger T;
+			T.When = EHexTriggerTiming::OnRoundStart;
+			T.Effects = { FHexEffectStep::MakeBlock(5.0f, NAME_None, 0.0f) };
+			T.CounterThreshold = 3;
+			T.MaxPerRound = -1;
+			T.MaxPerBattle = -1;
+			R.Triggers = { T };
+
+			State.RuneLoadout.SetSlot(0, &R);
+			State.RebuildRuleAggregate();
+
+			FHexTriggerBus Bus;
+			Bus.RebuildListeners(State);
+			Bus.ResetBattleCounters();
+
+			FHexTriggerContext TCtx;
+			TCtx.SourceUnitId = State.HeroUnitId;
+
+			// 前两次应当只攒计数、不产出动作
+			FHexActionQueue Q1;
+			Bus.Emit(EHexTriggerTiming::OnRoundStart, TCtx, State, Q1);
+			Ctx.CheckEqual(TEXT("CounterThreshold=3 第 1 次不触发"), Q1.Num(), 0);
+
+			FHexActionQueue Q2;
+			Bus.Emit(EHexTriggerTiming::OnRoundStart, TCtx, State, Q2);
+			Ctx.CheckEqual(TEXT("CounterThreshold=3 第 2 次不触发"), Q2.Num(), 0);
+
+			// 第三次攒满 → 产出
+			FHexActionQueue Q3;
+			Bus.Emit(EHexTriggerTiming::OnRoundStart, TCtx, State, Q3);
+			Ctx.Check(TEXT("CounterThreshold=3 第 3 次触发"),
+				Q3.Num() > 0,
+				TEXT("攒满 3 次仍未触发 → CounterThreshold 未被实现或语义写反"));
+
+			// 触发后清零 → 第 4 次又不触发
+			FHexActionQueue Q4;
+			Bus.Emit(EHexTriggerTiming::OnRoundStart, TCtx, State, Q4);
+			Ctx.CheckEqual(TEXT("触发后计数清零（第 4 次不触发）"), Q4.Num(), 0);
+		}
+
+		// ── 未实现的 EffectOp 必须记违规，不得静默丢弃
+		//
+		// ⚠️ TriggerBus 只实现了 24 个算子中的 8 个。
+		//    原先走到 default 就无声跳过，作者会以为"符文很弱"
+		//    然后去调数值，永远查不到真因。
+		{
+			FHexBattleState State(7102);
+			SetupFullBattle(State, HexK::HeroSpawnCol, HexK::HeroSpawnRow + 2);
+
+			// 用一个 TriggerBus 尚未实现的算子（改地形）
+			FHexRuneData R;
+			R.Id = TEXT("__unimpl_probe");
+			R.DisplayName = TEXT("未实现算子探针");
+			FHexRuneTrigger T;
+			T.When = EHexTriggerTiming::OnRoundStart;
+			T.Effects = { FHexEffectStep::MakeOp(EHexEffectOp::ModifyTerrain) };
+			R.Triggers = { T };
+
+			State.RuneLoadout.SetSlot(0, &R);
+			State.RebuildRuleAggregate();
+
+			FHexTriggerBus Bus;
+			Bus.RebuildListeners(State);
+			Bus.ResetBattleCounters();
+
+			const int32 ViolationsBefore = State.GetRuleViolations().Num();
+
+			FHexActionQueue Q;
+			FHexTriggerContext TCtx;
+			TCtx.SourceUnitId = State.HeroUnitId;
+			Bus.Emit(EHexTriggerTiming::OnRoundStart, TCtx, State, Q);
+
+			Ctx.Check(TEXT("未实现的 EffectOp 会记录违规（不静默丢弃）"),
+				State.GetRuleViolations().Num() > ViolationsBefore,
+				TEXT("未实现算子被静默跳过 → 符文哑火且无任何线索，"
+					 "这正是最难排查的一类缺陷"));
+		}
+	}
+
+	// ═══════════════════════════════════════════ 新启用规则的实证（P2）
+	//
+	// ══════════════════════════════════════════════════════════════
+	// 为什么加了符文还必须单独验这几条规则
+	// ══════════════════════════════════════════════════════════════
+	// 这 4 条 GameRule 在 RuleBook 里实现已久，但此前【没有任何符文
+	// 使用它们】—— 等于那几段实现从来没在真实路径上跑过。
+	// 现在第二批符文开始用了，必须证明"规则改写真的传导到了结果"，
+	// 而不是又一次"写了但不生效"。
+	//
+	// 试玩机器人不会装备符文，所以批量试玩【测不到】这些 ——
+	// 200 局全跑完数据一模一样，那是假绿。
+	void CheckNewlyUsedRules(FHexVerifyContext& Ctx)
+	{
+		Ctx.Section(TEXT("新启用的规则改写实证（P2）"));
+
+		auto MakeRunWithRune = [](FHexBattleState& State, const TCHAR* RuneId)
+		{
+			FHexLayouts::Build(TEXT("open_hall"), State.Grid);
+			SpawnHero(State);
+			SpawnEnemy(State, TEXT("biting_hound"),
+				HexK::HeroSpawnCol, HexK::HeroSpawnRow + 2);
+			State.RebuildOccupancy();
+
+			if (const FHexHeroData* H = FHexContentLibrary::FindHero(TEXT("warden")))
+			{
+				TArray<FHexCardInstance> Deck;
+				FHexContentLibrary::BuildStartingDeck(*H, Deck, State.FixedCards);
+				State.Piles.BeginBattle(Deck, State.Rng);
+				State.HeroEnergyMaxBase = H->EnergyMax;
+				State.HeroDrawBase = H->CardsDrawnPerTurn;
+				State.HeroPassiveRules = H->PassiveRules;
+			}
+			State.RuneLoadout.SetSlot(0, FHexRuneLibrary::FindRune(RuneId));
+			State.RebuildRuleAggregate();
+		};
+
+		// ── BlockMultiplier：《磐石誓约》格挡 ×1.5
+		{
+			FHexBattleState Base(8001);
+			MakeRunWithRune(Base, TEXT("rune_whetstone"));   // 不改格挡的符文作基线
+
+			FHexBattleState Buffed(8001);
+			MakeRunWithRune(Buffed, TEXT("rune_bulwark_oath"));
+
+			Ctx.CheckNearlyEqual(TEXT("基线格挡乘区 = 1.0"),
+				FHexRuleBook::BlockMultiplier(Base), 1.0f);
+			Ctx.CheckNearlyEqual(TEXT("《磐石誓约》使格挡乘区 = 1.5"),
+				FHexRuleBook::BlockMultiplier(Buffed), 1.5f);
+
+			// 抽牌数 -1 的代价也必须真实存在
+			Ctx.CheckEqual(TEXT("《磐石誓约》的抽牌代价真实存在"),
+				FHexRuleBook::CardsDrawnPerTurn(Buffed),
+				FHexRuleBook::CardsDrawnPerTurn(Base) - 1);
+		}
+
+		// ── CritDamageMultiplier：《空手》+0.6
+		{
+			FHexBattleState Base(8002);
+			MakeRunWithRune(Base, TEXT("rune_whetstone"));
+
+			FHexBattleState Buffed(8002);
+			MakeRunWithRune(Buffed, TEXT("rune_empty_hand"));
+
+			Ctx.Check(TEXT("《空手》提升暴击伤害倍率"),
+				FHexRuleBook::CritDamageMultiplier(Buffed)
+				> FHexRuleBook::CritDamageMultiplier(Base),
+				FString::Printf(TEXT("基线=%.2f 装备后=%.2f"),
+					FHexRuleBook::CritDamageMultiplier(Base),
+					FHexRuleBook::CritDamageMultiplier(Buffed)));
+
+			Ctx.CheckEqual(TEXT("《空手》的手牌上限代价真实存在"),
+				FHexRuleBook::HandLimit(Buffed),
+				FHexRuleBook::HandLimit(Base) - 4);
+		}
+
+		// ── NoDrawFixedHand：《定式》
+		{
+			FHexBattleState Base(8003);
+			MakeRunWithRune(Base, TEXT("rune_whetstone"));
+
+			FHexBattleState Fixed(8003);
+			MakeRunWithRune(Fixed, TEXT("rune_fixed_form"));
+
+			Ctx.Check(TEXT("基线不启用固定手牌"),
+				!FHexRuleBook::IsFixedHand(Base), TEXT(""));
+			Ctx.Check(TEXT("《定式》启用固定手牌规则"),
+				FHexRuleBook::IsFixedHand(Fixed),
+				TEXT("NoDrawFixedHand 此前无任何符文使用 —— "
+					 "这条规则的实现从未被真实验证过"));
+		}
+
+		// ── SizeClassOverride + KnockbackImmune：《巨化》
+		{
+			FHexBattleState Base(8004);
+			MakeRunWithRune(Base, TEXT("rune_whetstone"));
+
+			FHexBattleState Big(8004);
+			MakeRunWithRune(Big, TEXT("rune_titanize"));
+
+			const FHexUnit* BaseHero = Base.GetHero();
+			const FHexUnit* BigHero = Big.GetHero();
+
+			// ⚠️ KnockbackResistOf 返回的是【抗性数值】而不是布尔 ——
+			//    接口名是 Immune 但语义是 Resist，容易看错。
+			if (BaseHero && BigHero)
+			{
+				Ctx.Check(TEXT("《巨化》提升击退抗性"),
+					FHexRuleBook::KnockbackResistOf(Big, *BigHero)
+					> FHexRuleBook::KnockbackResistOf(Base, *BaseHero),
+					FString::Printf(TEXT("基线=%d 装备后=%d"),
+						FHexRuleBook::KnockbackResistOf(Base, *BaseHero),
+						FHexRuleBook::KnockbackResistOf(Big, *BigHero)));
+
+				// 体型覆写：§6.3 示例 F 点名要求，HexRuleBook.h 也点名过
+				Ctx.Check(TEXT("基线体型为 S"),
+					FHexRuleBook::SizeClassOf(Base, *BaseHero) == EHexSizeClass::S,
+					TEXT(""));
+				Ctx.Check(TEXT("《巨化》把体型改写为 M（SizeClassOverride 生效）"),
+					FHexRuleBook::SizeClassOf(Big, *BigHero) == EHexSizeClass::M,
+					TEXT("SizeClassOverride 此前无符文使用 —— "
+						 "§6.3 示例 F《巨化》一直不存在，这条实现从未被验证"));
 			}
 		}
 	}
@@ -828,6 +1482,10 @@ bool FHexVerifySuites::VerifyTrigger(FHexVerifyContext& Ctx)
 {
 	CheckTriggerOrder(Ctx);
 	CheckTriggerDispatch(Ctx);
+	CheckTimingCoverage(Ctx);
+	CheckRuneEndToEnd(Ctx);
+	CheckEffectExpressiveness(Ctx);
+	CheckNewlyUsedRules(Ctx);
 	return Ctx.NumFailed() == 0;
 }
 

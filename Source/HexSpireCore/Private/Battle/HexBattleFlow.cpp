@@ -1,4 +1,4 @@
-// Copyright Hex Spire. All Rights Reserved.
+﻿// Copyright Hex Spire. All Rights Reserved.
 
 #include "Battle/HexBattleFlow.h"
 #include "Battle/HexBattleState.h"
@@ -15,6 +15,223 @@
 FHexBattleFlow::FHexBattleFlow(FHexBattleState& InState)
 	: State(InState)
 {
+}
+
+// ══════════════════════════════════════════════════════════ 触发派发（§6.3）
+//
+// ══════════════════════════════════════════════════════════════════
+// 这一段是 P0 缺陷的修复处，务必先读完再改
+// ══════════════════════════════════════════════════════════════════
+// 症状：22 个触发时机里有 8 个从来没被 Emit 过。挂在它们上面的符文
+//       装备后【毫无效果、毫无报错】—— 实测《食魂》(OnKill)、
+//       《焚心》(OnCrit)、《轮回护符》(OnDeckReshuffled) 三个符文
+//       完全是死的，策划案 §6.3 的两组示范组合也无法成立。
+//       而当时 1049 项断言全部通过。
+//
+// 讽刺的是 HexTriggerBus.h 开头就写着「埋点必须一次埋满，
+// OnBlockBroken / OnDeckReshuffled 这类最容易忘」—— 然后就忘了。
+// 结论：靠纪律提醒不可靠，必须靠【结构】保证。
+//
+// 修法：不再让业务代码逐处手写 Emit，而是统一在"动作执行完"这个
+//       唯一通道上翻译。动作是状态变更的唯一途径（纪律 2），
+//       所以这里天然不会漏；漏了也会被埋点覆盖率断言抓住
+//       （VerifyTrigger::CheckTimingCoverage）。
+//
+// ── 分工表（必须互斥，否则会双重触发）──
+//   本翻译器负责（原先完全没有埋点的 8 个）：
+//     OnDamageDealt / OnDamageTaken / OnCrit
+//     OnKill / OnUnitDeath
+//     OnCardDrawn / OnDeckReshuffled
+//     OnMoveEnemy（推拉造成的位移；卡牌主动推拉已有埋点，见下）
+//
+//   仍由业务代码手写 Emit（保持原状，本次【不动】）：
+//     OnBattleStart / OnRoundStart / OnRoundEnd / OnBattleWin
+//     OnCardPlayed / OnEnergyLeftover     ← 非动作型，没有对应的单一动作
+//     OnBlockGained / OnMoveSelf / OnStatusApplied / OnCardDiscarded
+//                                         ← 已有埋点，翻译器【不得】重复处理
+//     OnAttack                            ← ②′ 数值钩子，不走 Emit
+//
+// ⚠️ 往分工表里加东西前，先确认另一侧没有同名埋点。
+//    双重触发比不触发更难查：符文效果会莫名翻倍，且看起来像数值问题。
+
+int32 FHexBattleFlow::ResolveQueue()
+{
+	// 预算是"本次结算"的概念，每次进来重置。
+	ObserverEmitBudget = HexK::MaxObserverEmitsPerResolve;
+
+	return Queue.ResolveAll(State,
+		[this](const FHexGameAction& Action,
+			TArrayView<const FHexBattleEvent> NewEvents,
+			FHexBattleState& /*InState*/,
+			FHexActionQueue& InQueue)
+		{
+			DispatchTriggersForAction(Action, NewEvents, InQueue);
+		});
+}
+
+bool FHexBattleFlow::IsPlayerSide(int32 UnitId) const
+{
+	const FHexUnit* U = State.FindUnit(UnitId);
+	return U && U->Team == EHexTeam::Player;
+}
+
+void FHexBattleFlow::EmitWithBudget(
+	EHexTriggerTiming Timing,
+	const FHexTriggerContext& Ctx,
+	FHexActionQueue& InQueue)
+{
+	// ⚠️ 预算耗尽时记违规，而不是静默返回 ——
+	//    静默返回会让"符文突然不生效"变成无头案，
+	//    那正是我们刚刚花大力气消灭的那类问题。
+	if (ObserverEmitBudget <= 0)
+	{
+		State.AddRuleViolation(
+			TEXT("trigger_chain_budget"),
+			FString::Printf(
+				TEXT("单次结算的触发翻译次数达上限 %d（疑似符文自激），时机 %d"),
+				HexK::MaxObserverEmitsPerResolve, static_cast<int32>(Timing)));
+		return;
+	}
+
+	--ObserverEmitBudget;
+	TriggerBus.Emit(Timing, Ctx, State, InQueue);
+}
+
+void FHexBattleFlow::DispatchTriggersForAction(
+	const FHexGameAction& Action,
+	TArrayView<const FHexBattleEvent> NewEvents,
+	FHexActionQueue& InQueue)
+{
+	// ── 先处理"只能由动作本身表达"的时机
+	//
+	// 击退/踩踏是敌人被动位移。卡牌里主动推拉的分支已经在
+	// ExecuteStep 里 Emit 过 OnMoveEnemy，所以这里【只补】
+	// 那些不经由卡牌效果产生的位移（如碰撞连锁、地形推挤）。
+	// 判据用 SourceTag 为空：卡牌产生的动作都会带 SourceTag。
+	if ((Action.Type == EHexActionType::Knockback
+			|| Action.Type == EHexActionType::Trample)
+		&& Action.SourceTag.IsEmpty())
+	{
+		FHexTriggerContext Ctx;
+		Ctx.SourceUnitId = Action.SourceUnitId;
+		Ctx.TargetUnitId = Action.TargetUnitId;
+		EmitWithBudget(EHexTriggerTiming::OnMoveEnemy, Ctx, InQueue);
+	}
+
+	// ── 其余全部以【事件】为准
+	//
+	// ⚠️ 不要照着动作参数重算。"格挡是否被打破"、"这一下是否致死"、
+	//    "抽牌时是否触发了洗回"只有 Resolver 内部知道；
+	//    在这里重算必然与真实结算产生偏差（而且是静默偏差）。
+	for (const FHexBattleEvent& E : NewEvents)
+	{
+		// ── 伤害链
+		if (E.Type == TEXT("damage_dealt"))
+		{
+			FHexTriggerContext Ctx;
+			Ctx.SourceUnitId = E.SourceUnitId;
+			Ctx.TargetUnitId = E.TargetUnitId;
+			// IntA 护盾 / IntB 格挡 / IntC 真正打进 HP 的部分。
+			// 符文关心"打进去多少"，所以取 HP 伤害。
+			Ctx.IntA = E.IntC;
+
+			// 语义：符文属于玩家，所以
+			//   "我造成伤害" = 来源是玩家方
+			//   "我受到伤害" = 承受方是玩家方
+			// 敌人互相伤害（尖刺、踩踏连锁）不该触发玩家符文。
+			if (IsPlayerSide(E.SourceUnitId))
+			{
+				EmitWithBudget(EHexTriggerTiming::OnDamageDealt, Ctx, InQueue);
+
+				if (E.bFlagA)   // bFlagA = 本次是暴击
+				{
+					EmitWithBudget(EHexTriggerTiming::OnCrit, Ctx, InQueue);
+				}
+			}
+
+			if (IsPlayerSide(E.TargetUnitId))
+			{
+				EmitWithBudget(EHexTriggerTiming::OnDamageTaken, Ctx, InQueue);
+			}
+			continue;
+		}
+
+		// ── 闪避
+		if (E.Type == TEXT("dodged"))
+		{
+			if (IsPlayerSide(E.TargetUnitId))
+			{
+				FHexTriggerContext Ctx;
+				Ctx.SourceUnitId = E.SourceUnitId;
+				Ctx.TargetUnitId = E.TargetUnitId;
+				EmitWithBudget(EHexTriggerTiming::OnDodge, Ctx, InQueue);
+			}
+			continue;
+		}
+
+		// ── 格挡被打破
+		if (E.Type == TEXT("block_broken"))
+		{
+			if (IsPlayerSide(E.TargetUnitId))
+			{
+				FHexTriggerContext Ctx;
+				Ctx.SourceUnitId = E.SourceUnitId;
+				Ctx.TargetUnitId = E.TargetUnitId;
+				EmitWithBudget(EHexTriggerTiming::OnBlockBroken, Ctx, InQueue);
+			}
+			continue;
+		}
+
+		// ── 死亡
+		if (E.Type == TEXT("unit_died"))
+		{
+			FHexTriggerContext Ctx;
+			Ctx.SourceUnitId = E.SourceUnitId;   // 击杀者（环境伤害时为 -1）
+			Ctx.TargetUnitId = E.TargetUnitId;   // 死者
+
+			// OnKill：玩家击杀了什么。《食魂》靠它抽牌。
+			if (IsPlayerSide(E.SourceUnitId))
+			{
+				EmitWithBudget(EHexTriggerTiming::OnKill, Ctx, InQueue);
+			}
+
+			// OnUnitDeath：任何单位死亡，【不过滤】。
+			// 与 OnKill 分开是有意的：有些符文关心"场上有人死了"
+			// （尖刺致死、毒杀），那时击杀者是 -1，OnKill 不该触发。
+			EmitWithBudget(EHexTriggerTiming::OnUnitDeath, Ctx, InQueue);
+			continue;
+		}
+
+		// ── 牌堆链
+		if (E.Type == TEXT("cards_drawn"))
+		{
+			FHexTriggerContext Ctx;
+			Ctx.SourceUnitId = State.HeroUnitId;
+			Ctx.IntA = E.IntA;   // 实际抽到的张数
+			EmitWithBudget(EHexTriggerTiming::OnCardDrawn, Ctx, InQueue);
+			continue;
+		}
+
+		if (E.Type == TEXT("card_exhausted"))
+		{
+			FHexTriggerContext Ctx;
+			Ctx.SourceUnitId = State.HeroUnitId;
+			Ctx.IntA = E.IntA;
+			EmitWithBudget(EHexTriggerTiming::OnCardExhausted, Ctx, InQueue);
+			continue;
+		}
+
+		if (E.Type == TEXT("deck_reshuffled"))
+		{
+			// §6.3 点名这是 D2 带来的好钩子：小卡组会频繁洗回。
+			// 《薄刃契》(容量-3) + 《轮回护符》(洗回得格挡) 的组合
+			// 完全建立在它上面。
+			FHexTriggerContext Ctx;
+			Ctx.SourceUnitId = State.HeroUnitId;
+			EmitWithBudget(EHexTriggerTiming::OnDeckReshuffled, Ctx, InQueue);
+			continue;
+		}
+	}
 }
 
 const FHexCardData* FHexBattleFlow::LookupCard(FName CardId) const
@@ -62,7 +279,7 @@ void FHexBattleFlow::BeginBattle()
 		FHexTriggerContext Ctx;
 		Ctx.SourceUnitId = State.HeroUnitId;
 		TriggerBus.Emit(EHexTriggerTiming::OnBattleStart, Ctx, State, Queue);
-		Queue.ResolveAll(State);
+		ResolveQueue();
 	}
 
 	// 生成敌方首个意图并显示（§8.4）
@@ -83,7 +300,7 @@ void FHexBattleFlow::BeginRound()
 
 	State.Phase = EHexBattlePhase::RoundStart;
 	Queue.PushBack(FHexActions::AdvanceRound());
-	Queue.ResolveAll(State);
+	ResolveQueue();
 
 	TriggerBus.ResetRoundCounters();
 
@@ -92,7 +309,7 @@ void FHexBattleFlow::BeginRound()
 		FHexTriggerContext Ctx;
 		Ctx.SourceUnitId = State.HeroUnitId;
 		TriggerBus.Emit(EHexTriggerTiming::OnRoundStart, Ctx, State, Queue);
-		Queue.ResolveAll(State);
+		ResolveQueue();
 	}
 
 	// 状态 tick（回合开始时机）
@@ -108,12 +325,12 @@ void FHexBattleFlow::BeginRound()
 	{
 		const int32 DrawCount = FHexRuleBook::CardsDrawnPerTurn(State);
 		Queue.PushBack(FHexActions::DrawCards(DrawCount));
-		Queue.ResolveAll(State);
+		ResolveQueue();
 	}
 
 	// 体力 = 体力上限
 	Queue.PushBack(FHexActions::SetEnergy(FHexRuleBook::EnergyMax(State)));
-	Queue.ResolveAll(State);
+	ResolveQueue();
 
 	State.Phase = EHexBattlePhase::PlayerPhase;
 	State.LogEvent(TEXT("player_phase_begin"));
@@ -233,7 +450,7 @@ EHexPlayResult FHexBattleFlow::PlayCard(int32 CardUid, const FIntVector& TargetC
 		TriggerBus.Emit(EHexTriggerTiming::OnCardPlayed, Ctx, State, Queue);
 	}
 
-	Queue.ResolveAll(State);
+	ResolveQueue();
 
 	CheckBattleEnd();
 
@@ -484,7 +701,8 @@ void FHexBattleFlow::ExecuteStep(
 	{
 		if (Step.TargetFilter == EHexTargetFilter::Self)
 		{
-			FHexGameAction A = FHexActions::ApplyStatus(Hero->Id, Step.StatusId, Step.StatusStacks);
+			FHexGameAction A = FHexActions::ApplyStatus(
+				Hero->Id, Step.StatusId, Step.StatusStacks, Hero->Id);
 			A.SourceTag = SrcTag;
 			Queue.PushBack(A);
 		}
@@ -495,8 +713,10 @@ void FHexBattleFlow::ExecuteStep(
 				State, *Hero, Card.TargetSpec, TargetCell, Step.TargetFilter, TargetIds);
 			for (const int32 TargetId : TargetIds)
 			{
+				// ⚠️ 末参数传 Hero->Id：玩家点燃的敌人若被烧死，
+				//    必须算【玩家击杀】，否则《食魂》在烧流下失效。
 				FHexGameAction A = FHexActions::ApplyStatus(
-					TargetId, Step.StatusId, Step.StatusStacks);
+					TargetId, Step.StatusId, Step.StatusStacks, Hero->Id);
 				A.SourceTag = SrcTag;
 				Queue.PushBack(A);
 			}
@@ -575,7 +795,7 @@ void FHexBattleFlow::EndPlayerTurn()
 		FHexTriggerContext Ctx;
 		Ctx.SourceUnitId = State.HeroUnitId;
 		TriggerBus.Emit(EHexTriggerTiming::OnRoundEnd, Ctx, State, Queue);
-		Queue.ResolveAll(State);
+		ResolveQueue();
 	}
 
 	// ── 剩余体力 → Emit(OnEnergyLeftover) → 清零
@@ -586,7 +806,7 @@ void FHexBattleFlow::EndPlayerTurn()
 		Ctx.SourceUnitId = State.HeroUnitId;
 		Ctx.IntA = State.Energy;
 		TriggerBus.Emit(EHexTriggerTiming::OnEnergyLeftover, Ctx, State, Queue);
-		Queue.ResolveAll(State);
+		ResolveQueue();
 	}
 	Queue.PushBack(FHexActions::SetEnergy(0));
 
@@ -621,7 +841,7 @@ void FHexBattleFlow::EndPlayerTurn()
 	}
 
 	// 状态 tick（回合结束时机：燃烧/中毒在此结算）
-	Queue.ResolveAll(State);
+	ResolveQueue();
 	TickStatuses(EHexStatusTick::RoundEnd);
 
 	if (CheckBattleEnd())
@@ -662,7 +882,7 @@ void FHexBattleFlow::TickStatuses(EHexStatusTick Timing)
 	{
 		Queue.PushBack(FHexActions::TickStatus(Id, Timing));
 	}
-	Queue.ResolveAll(State);
+	ResolveQueue();
 }
 
 // ───────────────────────────────────────────────────────── 敌方阶段
@@ -685,7 +905,7 @@ void FHexBattleFlow::RunEnemyPhase()
 		}
 
 		FHexEnemyAI::ExecuteIntent(State, *Enemy, Queue);
-		Queue.ResolveAll(State);
+		ResolveQueue();
 
 		// 玩家死了就立刻停 —— 不让后续敌人"鞭尸"
 		if (State.IsPlayerDefeated())
@@ -764,7 +984,7 @@ bool FHexBattleFlow::CheckBattleEnd()
 		FHexTriggerContext Ctx;
 		Ctx.SourceUnitId = State.HeroUnitId;
 		TriggerBus.Emit(EHexTriggerTiming::OnBattleWin, Ctx, State, Queue);
-		Queue.ResolveAll(State);
+		ResolveQueue();
 
 		State.LogEvent(TEXT("battle_win"));
 		EnterExplorePhase();
@@ -786,7 +1006,7 @@ void FHexBattleFlow::EnterExplorePhase()
 	// 把弃牌堆洗回并补满手牌，让玩家有移动卡可用
 	State.Piles.ReshuffleDiscardIntoDraw(State.Rng);
 	Queue.PushBack(FHexActions::DrawCards(FHexRuleBook::HandLimit(State)));
-	Queue.ResolveAll(State);
+	ResolveQueue();
 
 	State.LogEvent(TEXT("explore_phase_begin"));
 }

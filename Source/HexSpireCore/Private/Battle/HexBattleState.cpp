@@ -287,6 +287,19 @@ void FHexBattleState::DrainEvents(TArray<FHexBattleEvent>& Out)
 	EventLog.Reset();
 }
 
+TArrayView<const FHexBattleEvent> FHexBattleState::GetPendingEventsFrom(int32 StartIndex) const
+{
+	// 越界一律返回空视图而不是断言：调用方是触发翻译器，
+	// 极端情况下（事件被提前 Drain）它应该"什么都不触发"，
+	// 而不是把整场战斗弄崩。
+	if (StartIndex < 0 || StartIndex >= EventLog.Num())
+	{
+		return TArrayView<const FHexBattleEvent>();
+	}
+	return TArrayView<const FHexBattleEvent>(
+		EventLog.GetData() + StartIndex, EventLog.Num() - StartIndex);
+}
+
 // ───────────────────────────────────────────────────────── 动作日志
 
 void FHexBattleState::LogAction(const FHexGameAction& Action)

@@ -175,9 +175,22 @@ public:
 	UFUNCTION(BlueprintPure, Category = "顶栏|文字")
 	FText GetDeckText() const;
 
-	/** 符文，形如 "符文 [裂魂][空][空]" */
+	/** 符文，形如 "符文 结算顺序→  1.砺石 2.倍影 3.— …" */
 	UFUNCTION(BlueprintPure, Category = "顶栏|文字")
 	FText GetRuneText() const;
+
+	/**
+	 * 已装符文的机制详情（逐行）。
+	 *
+	 * ⚠️ 这条存在的理由是 R8：「符文效果玩家看不懂 → 无法推理组合
+	 *    → D6 的价值归零」。符文的全部意义是让玩家研究组合，
+	 *    而研究的前提是能读到"何时触发、几次、与什么交互"。
+	 *    只显示名字（原先的做法）等于把符文变成盲盒。
+	 *
+	 * MechanicText 由 VerifyRunes 强制 ≥30 字，所以这里一定有内容可读。
+	 */
+	UFUNCTION(BlueprintPure, Category = "顶栏|文字")
+	FText GetRuneDetailText() const;
 
 	/** 回合数。不在战斗中返回空。 */
 	UFUNCTION(BlueprintPure, Category = "顶栏|文字")

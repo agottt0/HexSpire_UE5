@@ -899,6 +899,11 @@ FText UHexHandPanelWidget::GetDeckText() const
 
 FText UHexHandPanelWidget::GetRuneText() const
 {
+	// ⚠️ §6.5 是【硬 UI 要求】：必须明示"结算顺序 →"的方向。
+	//    原先这里只列名字，玩家无从知道槽位顺序会影响结算 ——
+	//    而"同样 6 个符文换个顺序强度不同"（[砺石,倍影]=21 vs
+	//    [倍影,砺石]=19）是 D6 白送的一层深度。
+	//    不画这个箭头等于把那层深度直接扔掉。
 	if (AHexDemoGameMode* Mode = GetMode())
 	{
 		if (const FHexRunState* Run = Mode->GetRunState())
@@ -907,14 +912,58 @@ FText UHexHandPanelWidget::GetRuneText() const
 			for (int32 I = 0; I < FHexRuneLoadout::SlotCount; ++I)
 			{
 				const FHexRuneData* R = Run->RuneLoadout.GetSlot(I);
+				// 带槽位号：玩家要能说出"把 3 号挪到 1 号"，
+				// 没有编号就只能靠数第几个，重排时极易点错。
 				Runes += R
-					? FString::Printf(TEXT("[%s]"), *R->DisplayName)
-					: TEXT("[空]");
+					? FString::Printf(TEXT("%d.%s "), I + 1, *R->DisplayName)
+					: FString::Printf(TEXT("%d.— "), I + 1);
 			}
-			return FText::FromString(TEXT("符文 ") + Runes);
+
+			// 锁定提示：战斗中不能重排（§6.5），
+			// 不说明的话玩家会以为是 bug。
+			const FString Lock = Run->bRuneLayoutLocked
+				? TEXT("（战斗中锁定）")
+				: TEXT("");
+
+			return FText::FromString(
+				FString::Printf(TEXT("符文 结算顺序→  %s%s"), *Runes, *Lock));
 		}
 	}
-	return FText::FromString(TEXT("符文 [空][空][空]"));
+	return FText::FromString(TEXT("符文 结算顺序→  1.— 2.— 3.— 4.— 5.— 6.—"));
+}
+
+FText UHexHandPanelWidget::GetRuneDetailText() const
+{
+	AHexDemoGameMode* Mode = GetMode();
+	const FHexRunState* Run = Mode ? Mode->GetRunState() : nullptr;
+	if (!Run)
+	{
+		// ⚠️ 设计器预览时没有 GameMode，必须返回合法值而不是崩。
+		return FText::GetEmpty();
+	}
+
+	FString Out;
+	for (int32 I = 0; I < FHexRuneLoadout::SlotCount; ++I)
+	{
+		const FHexRuneData* R = Run->RuneLoadout.GetSlot(I);
+		if (!R)
+		{
+			continue;
+		}
+
+		// 诅咒要显式标出来 —— 玩家必须知道自己背着代价。
+		// （VerifyRunes 断言 bIsCursed 与稀有度一致，所以这个标记可信。）
+		const FString Mark = R->bIsCursed ? TEXT("【诅咒】") : TEXT("");
+
+		Out += FString::Printf(TEXT("%d. %s%s\n    %s\n"),
+			I + 1, *Mark, *R->DisplayName, *R->MechanicText);
+	}
+
+	if (Out.IsEmpty())
+	{
+		return FText::FromString(TEXT("尚未装备符文。空槽是邀请，不是缺失。"));
+	}
+	return FText::FromString(Out);
 }
 
 FText UHexHandPanelWidget::GetRoundText() const
