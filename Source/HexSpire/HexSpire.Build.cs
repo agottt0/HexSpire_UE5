@@ -35,6 +35,19 @@ public class HexSpire : ModuleRules
 			//    而 tile 尺寸（HexK::TileWidth/TileHeight）还在调。
 			//    程序化生成让"改常量 → 重编译 → 立刻看到"成为一步操作。
 			"ProceduralMeshComponent",
+
+			// 技能特效。Niagara 在 UE 5.8 里 EnabledByDefault=true，
+			// 所以不需要往 .uproject 的 Plugins 里加条目 ——
+			// 加了反而会在插件被禁用时产生"明明写了却不生效"的困惑。
+			"Niagara",
+
+			// 外观资产（DA_UnitVisual_*）按目录扫描加载。
+			// ⚠️ 刻意用 AssetRegistry 扫目录，而不是按 UnitId 拼路径去 LoadObject：
+			//    拼路径的话资产改名就静默找不到，而扫目录能用资产
+			//    【自己声明的 UnitId】匹配 —— 于是"资产名写错"退化成能用，
+			//    只有"UnitId 写错"才报错，那才是真正需要报的那个。
+			//    见 FHexUnitTableLoader::LoadVisualSets。
+			"AssetRegistry",
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]

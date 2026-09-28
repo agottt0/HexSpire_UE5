@@ -6,6 +6,7 @@
 #include "UI/HexCardWidget.h"
 #include "UI/HexCardWidgetWide.h"
 #include "UI/HexHandPanelWidget.h"
+#include "UI/HexRuneSlotWidget.h"
 #include "UI/HexTopBarLayout.h"
 #include "HexSpire.h"
 
@@ -882,6 +883,86 @@ namespace
 		}
 	}
 
+	/**
+	 * 符文卡（WB_TCard）的控件树。
+	 *
+	 * ⚠️ 结构与 UHexRuneSlotWidget::RebuildWidget 的默认树【必须一致】。
+	 *    设计器里给 CardArt 预填 TCard_1 当预览 —— 运行时 SetRune
+	 *    会按槽位换成 TCard_<N>，预览图只是让美术不用盲摆。
+	 */
+	void BuildTCardTree(UWidgetTree* Tree)
+	{
+		USizeBox* Root = MakeWidget<USizeBox>(Tree, TEXT("RuneSlotRoot"));
+		Root->SetWidthOverride(92.0f);
+		Root->SetHeightOverride(95.0f);
+		Tree->RootWidget = Root;
+
+		UOverlay* Ov = MakeWidget<UOverlay>(Tree, TEXT("RuneOverlay"));
+		Root->AddChild(Ov);
+
+		UImage* Art = MakeWidget<UImage>(Tree, TEXT("CardArt"));
+		if (UTexture2D* Preview = LoadObject<UTexture2D>(
+			nullptr, TEXT("/Game/ArtResource/Card/TCard_1.TCard_1")))
+		{
+			Art->SetBrushFromTexture(Preview, false);
+		}
+		Ov->AddChildToOverlay(Art);
+		if (UOverlaySlot* S = Cast<UOverlaySlot>(Art->Slot))
+		{
+			S->SetHorizontalAlignment(HAlign_Fill);
+			S->SetVerticalAlignment(VAlign_Fill);
+		}
+
+		UBorder* Sel = MakeWidget<UBorder>(Tree, TEXT("SlotBorder"));
+		Sel->SetBrushColor(FLinearColor(0, 0, 0, 0));
+		Ov->AddChildToOverlay(Sel);
+		if (UOverlaySlot* S = Cast<UOverlaySlot>(Sel->Slot))
+		{
+			S->SetHorizontalAlignment(HAlign_Fill);
+			S->SetVerticalAlignment(VAlign_Fill);
+		}
+
+		UTextBlock* Num = MakeWidget<UTextBlock>(Tree, TEXT("SlotNum"));
+		Num->SetFont(LayoutFont(10));
+		Num->SetText(FText::FromString(TEXT("1")));
+		Num->SetColorAndOpacity(FSlateColor(FLinearColor(0.95f, 0.92f, 0.80f)));
+		Num->SetShadowOffset(FVector2D(1, 1));
+		Num->SetShadowColorAndOpacity(FLinearColor(0, 0, 0, 0.9f));
+		Ov->AddChildToOverlay(Num);
+		if (UOverlaySlot* S = Cast<UOverlaySlot>(Num->Slot))
+		{
+			S->SetHorizontalAlignment(HAlign_Left);
+			S->SetVerticalAlignment(VAlign_Top);
+			S->SetPadding(FMargin(7.0f, 4.0f, 0.0f, 0.0f));
+		}
+
+		UVerticalBox* TextCol = MakeWidget<UVerticalBox>(Tree, TEXT("RuneTextCol"));
+		Ov->AddChildToOverlay(TextCol);
+		if (UOverlaySlot* S = Cast<UOverlaySlot>(TextCol->Slot))
+		{
+			S->SetHorizontalAlignment(HAlign_Center);
+			S->SetVerticalAlignment(VAlign_Bottom);
+			S->SetPadding(FMargin(2.0f, 0.0f, 2.0f, 7.0f));
+		}
+
+		UTextBlock* Name = MakeWidget<UTextBlock>(Tree, TEXT("RuneName"));
+		Name->SetFont(LayoutFont(13));
+		Name->SetText(FText::FromString(TEXT("砺石")));
+		Name->SetJustification(ETextJustify::Center);
+		Name->SetShadowOffset(FVector2D(1, 1));
+		Name->SetShadowColorAndOpacity(FLinearColor(0, 0, 0, 0.9f));
+		TextCol->AddChild(Name);
+
+		UTextBlock* Cat = MakeWidget<UTextBlock>(Tree, TEXT("RuneCategory"));
+		Cat->SetFont(LayoutFont(9));
+		Cat->SetText(FText::FromString(TEXT("触发器")));
+		Cat->SetJustification(ETextJustify::Center);
+		Cat->SetColorAndOpacity(FSlateColor(FLinearColor(0.85f, 0.85f, 0.82f)));
+		Cat->SetShadowOffset(FVector2D(1, 1));
+		Cat->SetShadowColorAndOpacity(FLinearColor(0, 0, 0, 0.9f));
+		TextCol->AddChild(Cat);
+	}
+
 	void BuildHandPanelTree(UWidgetTree* Tree)
 	{
 		UCanvasPanel* Canvas = MakeWidget<UCanvasPanel>(Tree, TEXT("PanelRoot"));
@@ -924,6 +1005,40 @@ namespace
 
 		// ── 右下角操作区（结束回合按钮 + 体力火苗）
 		BuildActionAreaTree(Tree, Canvas);
+
+		// ── 符文面板：正上方居中（标签 + 6 槽横排容器）
+		//
+		// ⚠️ 结构与 UHexHandPanelWidget::BuildRunePanelDefaultTree
+		//    【必须一致】。槽位控件是运行时按 RuneLoadout 建的
+		//    （同 HandBox 里的卡），这里只放容器与标签。
+		{
+			UVerticalBox* RuneCol = MakeWidget<UVerticalBox>(Tree, TEXT("RuneCol"));
+			Canvas->AddChild(RuneCol);
+			if (UCanvasPanelSlot* S = Cast<UCanvasPanelSlot>(RuneCol->Slot))
+			{
+				S->SetAnchors(FAnchors(0.5f, 0.0f, 0.5f, 0.0f));
+				S->SetAlignment(FVector2D(0.5f, 0.0f));
+				// ⚠️ 必须让开全宽 96px 的顶栏（同 BuildRunePanelDefaultTree）
+				S->SetOffsets(FMargin(
+					0.0f, HexTopBarLayout::BarHeight + 8.0f, 0.0f, 0.0f));
+				S->SetAutoSize(true);
+			}
+
+			UTextBlock* OrderLabel = MakeWidget<UTextBlock>(Tree, TEXT("RuneOrderLabel"));
+			OrderLabel->SetFont(LayoutFont(10));
+			OrderLabel->SetText(FText::FromString(TEXT("符文 · 结算顺序 →")));
+			OrderLabel->SetColorAndOpacity(FSlateColor(FLinearColor(0.62f, 0.62f, 0.60f)));
+			if (UVerticalBoxSlot* S =
+				Cast<UVerticalBoxSlot>(RuneCol->AddChild(OrderLabel)
+					? OrderLabel->Slot : nullptr))
+			{
+				S->SetPadding(FMargin(0, 0, 0, 4));
+				S->SetHorizontalAlignment(HAlign_Center);
+			}
+
+			UHorizontalBox* Runes = MakeWidget<UHorizontalBox>(Tree, TEXT("RuneBox"));
+			RuneCol->AddChild(Runes);
+		}
 	}
 }
 
@@ -979,6 +1094,8 @@ int32 UHexBuildCardWidgetCommandlet::Main(const FString& Params)
 		  UHexCardWidget::StaticClass(),      &BuildCardTree,      TEXT("卡面") },
 		{ TEXT("/Game/HexSpire/UI/WB_CardWide"),
 		  UHexCardWidgetWide::StaticClass(), &BuildWideCardTree,  TEXT("横版固定卡") },
+		{ TEXT("/Game/HexSpire/UI/WB_TCard"),
+		  UHexRuneSlotWidget::StaticClass(), &BuildTCardTree,     TEXT("符文卡") },
 		{ TEXT("/Game/HexSpire/UI/WB_HandPanel"),
 		  UHexHandPanelWidget::StaticClass(), &BuildHandPanelTree, TEXT("手牌区"),
 		  &AddTopBarBindings },

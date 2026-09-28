@@ -39,6 +39,20 @@ struct HEXSPIRECORE_API FHexBattleEvent
 	bool bFlagA = false;
 	FString TextA;
 
+	// ── 表现意图（由 FVisualScope 自动盖章，handler 不需要手填）
+	//
+	// ⚠️ 为什么用专用字段而不复用上面的 NameA：
+	//    NameA 的语义随 Type 变（状态 id、卡 id、地形名…）。
+	//    再往里塞一个含义，表现层就得写成
+	//      "如果 Type 是 damage_dealt 那 NameA 是 vfx，否则是状态 id"
+	//    —— 这种按类型解释同一字段的代码，每加一个事件类型
+	//    就多一条分支，必然漏，而漏掉是静默的。
+	FName VfxId;
+	FName SfxId;
+
+	/** 施法者该播的动作。None = 内容没声明，表现层自己取保守默认。 */
+	EHexUnitAnim CastAnim = EHexUnitAnim::None;
+
 	void Serialize(FArchive& Ar);
 };
 
@@ -193,6 +207,37 @@ public:
 	/** 便捷版：只填类型与两个单位 id */
 	void LogEvent(FName Type, int32 SourceId = -1, int32 TargetId = -1);
 
+	/**
+	 * 表现意图的作用域登记 —— 由 FHexActionResolver::Execute 在入口构造。
+	 *
+	 * 作用域存续期间，每条经 LogEvent 写入的事件都会自动盖上
+	 * 当前动作的 VfxId / SfxId / CastAnim（事件自己已填的值优先，
+	 * 见 LogEvent 实现处的注释）。
+	 *
+	 * ⚠️ 为什么是 RAII 而不是一对 Set/Clear 函数：
+	 *    handler 里存在 early break（目标已死、闪避）。
+	 *    手写 Clear 会被 break 跳过，于是下一个动作的事件
+	 *    盖上上一个动作的特效 —— "特效张冠李戴"比"没特效"难查得多，
+	 *    因为画面上确实有东西在播，你不会怀疑是盖章串了。
+	 *
+	 * ⚠️ 刻意【不】支持嵌套。Resolver 是逐个动作顺序执行的，
+	 *    一个动作的执行期内不会再 Execute 另一个动作
+	 *    （符文产出的动作是 push 进队列，由外层循环取出）。
+	 *    真出现嵌套说明结算模型被改坏了，此时构造函数会记违规。
+	 */
+	class HEXSPIRECORE_API FVisualScope
+	{
+	public:
+		FVisualScope(FHexBattleState& InState, FName Vfx, FName Sfx, EHexUnitAnim Anim);
+		~FVisualScope();
+
+		FVisualScope(const FVisualScope&) = delete;
+		FVisualScope& operator=(const FVisualScope&) = delete;
+
+	private:
+		FHexBattleState& State;
+	};
+
 	/** 取走全部事件（表现层每帧调用） */
 	void DrainEvents(TArray<FHexBattleEvent>& Out);
 
@@ -265,4 +310,18 @@ private:
 	TArray<FHexBattleEvent> EventLog;
 	TArray<FHexGameAction> ActionLog;
 	TArray<FHexRuleViolation> RuleViolations;
+
+	// ── 当前动作的表现意图（FVisualScope 管理其生命周期）
+	//
+	// ⚠️ 这几个字段【刻意不进 Serialize / ContentHash】。
+	//    它们是"正在执行某个动作"这一瞬时上下文，不是战斗状态；
+	//    在任何两个动作之间它们都必须是空的。
+	//    把它们写进存档会让"从存档恢复"与"正常执行到此"
+	//    产生不同的哈希，纪律 5 的逐位一致当场失效。
+	FName ScopeVfxId;
+	FName ScopeSfxId;
+	EHexUnitAnim ScopeCastAnim = EHexUnitAnim::None;
+	bool bInVisualScope = false;
+
+	friend class FVisualScope;
 };

@@ -129,6 +129,9 @@ TSharedRef<SWidget> UHexHandPanelWidget::RebuildWidget()
 	// ── 右下角操作区（体力火苗 + 结束回合按钮）
 	BuildActionAreaDefaultTree(RootCanvas);
 
+	// ── 符文面板（右上角 6 槽 + 顺序指示）
+	BuildRunePanelDefaultTree(RootCanvas);
+
 	WidgetTree->RootWidget = RootCanvas;
 
 	return Super::RebuildWidget();
@@ -1199,6 +1202,191 @@ void UHexHandPanelWidget::ApplyHeroArt()
 	}
 }
 
+// ══════════════════════════════════════════════════════════ 符文面板
+
+void UHexHandPanelWidget::BuildRunePanelDefaultTree(UCanvasPanel* Canvas)
+{
+	// 正上方居中、【顶栏下方】：标签在上、6 槽横排在下。
+	//
+	// ⚠️ Y 偏移必须让开顶栏 —— 顶栏是全宽 BarHeight(96px) 的实心面板，
+	//    放在它的范围内是"深色条叠深色板"，控件存在、自检全过，
+	//    就是肉眼看不见（实测踩过：y=10 时整条符文带没入顶栏）。
+	UVerticalBox* RuneCol = WidgetTree->ConstructWidget<UVerticalBox>(
+		UVerticalBox::StaticClass(), TEXT("RuneCol"));
+	Canvas->AddChild(RuneCol);
+	if (UCanvasPanelSlot* S = Cast<UCanvasPanelSlot>(RuneCol->Slot))
+	{
+		S->SetAnchors(FAnchors(0.5f, 0.0f, 0.5f, 0.0f));
+		S->SetAlignment(FVector2D(0.5f, 0.0f));
+		S->SetOffsets(FMargin(0.0f, HexTopBarLayout::BarHeight + 8.0f, 0.0f, 0.0f));
+		S->SetAutoSize(true);
+	}
+
+	RuneOrderLabel = WidgetTree->ConstructWidget<UTextBlock>(
+		UTextBlock::StaticClass(), TEXT("RuneOrderLabel"));
+	{
+		FSlateFontInfo Font = FCoreStyle::GetDefaultFontStyle("Regular", 10);
+		if (GEngine && GEngine->GetMediumFont())
+		{
+			Font.FontObject = GEngine->GetMediumFont();
+			Font.Size = 10;
+		}
+		RuneOrderLabel->SetFont(Font);
+		RuneOrderLabel->SetText(FText::FromString(TEXT("符文 · 结算顺序 →")));
+		RuneOrderLabel->SetColorAndOpacity(
+			FSlateColor(FLinearColor(0.62f, 0.62f, 0.60f)));
+	}
+	UVerticalBoxSlot* LabelSlot = RuneCol->AddChildToVerticalBox(RuneOrderLabel);
+	LabelSlot->SetPadding(FMargin(0, 0, 0, 4));
+	LabelSlot->SetHorizontalAlignment(HAlign_Center);
+
+	RuneBox = WidgetTree->ConstructWidget<UHorizontalBox>(
+		UHorizontalBox::StaticClass(), TEXT("RuneBox"));
+	RuneCol->AddChildToVerticalBox(RuneBox);
+}
+
+UClass* UHexHandPanelWidget::ResolveRuneSlotClass()
+{
+	if (ResolvedRuneSlotClass)
+	{
+		return ResolvedRuneSlotClass;
+	}
+
+	if (RuneSlotWidgetClass)
+	{
+		ResolvedRuneSlotClass = RuneSlotWidgetClass.Get();
+		return ResolvedRuneSlotClass;
+	}
+
+	// 与 ResolveCardClass 同一套约定：直接 LoadClass 生成类（_C），
+	// 不扫资产注册表（-game 下 WidgetBlueprint 不在注册表里，见那边）。
+	static const TCHAR* Candidates[] =
+	{
+		TEXT("/Game/HexSpire/UI/WB_TCard.WB_TCard_C"),
+		TEXT("/Game/HexSpire/UI/WB_RuneSlot.WB_RuneSlot_C"),
+		TEXT("/Game/HexSpire/UI/WBP_RuneSlot.WBP_RuneSlot_C"),
+		TEXT("/Game/HexSpire/UI/WBP_HexRuneSlot.WBP_HexRuneSlot_C"),
+	};
+	for (const TCHAR* Path : Candidates)
+	{
+		if (UClass* Loaded = LoadClass<UHexRuneSlotWidget>(nullptr, Path))
+		{
+			ResolvedRuneSlotClass = Loaded;
+			UE_LOG(LogHexSpire, Display,
+				TEXT("符文槽控件类：约定路径 %s"), Path);
+			return ResolvedRuneSlotClass;
+		}
+	}
+
+	ResolvedRuneSlotClass = UHexRuneSlotWidget::StaticClass();
+	return ResolvedRuneSlotClass;
+}
+
+void UHexHandPanelWidget::RefreshRunePanel(AHexDemoGameMode* Mode)
+{
+	// ── WBP 兜底注入
+	//
+	// ⚠️ WB_HandPanel 是在 RuneBox 存在【之前】生成的：设计器树接管后
+	//    C++ 默认树不再构建，RuneBox 恒为 nullptr，符文面板整块不出现
+	//    且不报错 —— 又一个"编辑器对、游戏错"。
+	//    这里检测到设计器树没摆 RuneBox 时，把符文条注入设计器的根
+	//    Canvas（正上方居中）。美术之后在 WBP 里摆了同名控件，
+	//    绑定生效，这段注入自然不再走。
+	if (!RuneBox)
+	{
+		if (UCanvasPanel* Canvas =
+			Cast<UCanvasPanel>(WidgetTree ? WidgetTree->RootWidget : nullptr))
+		{
+			BuildRunePanelDefaultTree(Canvas);
+			UE_LOG(LogHexSpire, Display,
+				TEXT("[符文面板] WBP 里没有 RuneBox，已注入默认布局（正上方居中）。"
+					 "要自定义版式请在 WB_HandPanel 里添加同名控件 RuneBox / RuneOrderLabel。"));
+		}
+		if (!RuneBox)
+		{
+			return;
+		}
+	}
+
+	const FHexRunState* Run = Mode ? Mode->GetRunState() : nullptr;
+	if (!Run)
+	{
+		// 设计器预览 / 开局前：留空槽预览
+		RuneBox->SetVisibility(ESlateVisibility::Collapsed);
+		return;
+	}
+	RuneBox->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+
+	const bool bLocked = Run->bRuneLayoutLocked;
+
+	// 固定 6 个槽，建一次之后只刷内容
+	while (RuneSlots.Num() < FHexRuneLoadout::SlotCount)
+	{
+		UHexRuneSlotWidget* W = CreateWidget<UHexRuneSlotWidget>(
+			this, ResolveRuneSlotClass());
+		if (!W)
+		{
+			break;
+		}
+		W->OnSlotClicked.BindUObject(
+			this, &UHexHandPanelWidget::OnRuneSlotClicked);
+		UHorizontalBoxSlot* S = RuneBox->AddChildToHorizontalBox(W);
+		S->SetPadding(FMargin(0, 0, 6, 0));
+		RuneSlots.Add(W);
+	}
+
+	for (int32 I = 0; I < RuneSlots.Num(); ++I)
+	{
+		RuneSlots[I]->SetRune(
+			I, Run->RuneLoadout.GetSlot(I), bLocked, I == PendingSwapSlot,
+			Mode ? Mode->GetRuneFlashStrength(I) : 0.0f);
+	}
+
+	if (RuneOrderLabel)
+	{
+		if (PendingSwapSlot != INDEX_NONE)
+		{
+			RuneOrderLabel->SetText(FText::FromString(FString::Printf(
+				TEXT("已选槽 %d —— 点另一个槽交换，点自己取消"),
+				PendingSwapSlot + 1)));
+		}
+		else
+		{
+			RuneOrderLabel->SetText(FText::FromString(bLocked
+				? TEXT("符文 · 结算顺序 →（战斗中锁定）")
+				: TEXT("符文 · 结算顺序 →（点两个槽交换）")));
+		}
+	}
+}
+
+void UHexHandPanelWidget::OnRuneSlotClicked(int32 SlotIndex)
+{
+	AHexDemoGameMode* Mode = GetMode();
+	if (!Mode)
+	{
+		return;
+	}
+
+	const FHexRunState* Run = Mode->GetRunState();
+	if (Run && Run->bRuneLayoutLocked)
+	{
+		// 锁定时不进入选中态，把请求发过去换一条"战斗中不能重排"的提示。
+		PendingSwapSlot = INDEX_NONE;
+		Mode->RequestRuneReorder(SlotIndex, SlotIndex);
+		return;
+	}
+
+	if (PendingSwapSlot == INDEX_NONE)
+	{
+		PendingSwapSlot = SlotIndex;
+		return;
+	}
+
+	// 第二次点击：交换（点同一个槽 = 取消，ReorderRune 对 A==B 是无操作）
+	Mode->RequestRuneReorder(PendingSwapSlot, SlotIndex);
+	PendingSwapSlot = INDEX_NONE;
+}
+
 void UHexHandPanelWidget::RefreshTopBar(AHexDemoGameMode* Mode)
 {
 	if (!bCppDrivesTopBar)
@@ -1240,7 +1428,10 @@ void UHexHandPanelWidget::RefreshTopBar(AHexDemoGameMode* Mode)
 	}
 	if (RuneInfo)
 	{
-		RuneInfo->SetText(GetRuneText());
+		// ⚠️ 符文已有卡牌条（顶部正中，带 TCard 美术）+ 悬停机制文本，
+		//    顶栏这行小字与之完全重复，而且贴着血条 ——
+		//    实测被误认为"符文面板放错了位置"。整行收掉，不再刷文字。
+		RuneInfo->SetVisibility(ESlateVisibility::Collapsed);
 	}
 
 	// ── 战斗专属的三行：战斗外收掉而不是留空行
@@ -1421,6 +1612,11 @@ void UHexHandPanelWidget::RefreshFromGameMode(AHexDemoGameMode* Mode)
 	//    放在 return 之后的话，从战斗回到地图时这块会带着
 	//    上一场战斗的体力数留在屏幕上（而且不报错）。
 	RefreshActionArea(Mode);
+
+	// ⚠️ 符文面板也必须在下面那些 return 之前刷，而且【无条件】刷：
+	//    重排只能在战斗外做（§6.5），跟着卡牌一起折叠等于把
+	//    重排功能藏进了永远看不到的地方。
+	RefreshRunePanel(Mode);
 
 	// ⚠️ HandBox / FixedBox 只要求【至少有一个】存在。
 	//    以前这里是 && 全都要有，改成 WBP 可绑定后那会让"只摆了手牌区、

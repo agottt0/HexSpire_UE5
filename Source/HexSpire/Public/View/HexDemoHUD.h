@@ -80,6 +80,16 @@ private:
 	void DrawDamagePreview(AHexDemoGameMode* Mode);
 	void DrawPileBrowser(AHexDemoGameMode* Mode);
 	void DrawLegend();
+
+	/**
+	 * 战斗分出胜负后的居中横幅。
+	 *
+	 * ⚠️ 状态行那一小行字不够：清完场后玩家的视线在棋盘中央
+	 *    （刚打完最后一击的位置），左上角的小字根本不会被看到 ——
+	 *    实测反馈就是"敌人都死了但没有任何结算反馈"。
+	 *    结算提示必须出现在视线所在的地方，且盖过其余战斗浮层。
+	 */
+	void DrawBattleOutcomeBanner(AHexDemoGameMode* Mode);
 	void DrawHelp(AHexDemoGameMode* Mode);
 
 	// ── 绘制辅助

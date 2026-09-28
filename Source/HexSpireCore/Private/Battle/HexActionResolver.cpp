@@ -1,6 +1,7 @@
 // Copyright Hex Spire. All Rights Reserved.
 
 #include "Battle/HexActionResolver.h"
+#include "Battle/HexBattleEventNames.h"
 #include "Battle/HexBattleState.h"
 #include "Battle/HexRuleBook.h"
 #include "Battle/HexDamageCalculator.h"
@@ -10,30 +11,35 @@
 
 namespace
 {
-	// 事件类型名常量 —— 表现层按这些名字订阅
-	const FName EV_EnergyChanged   = TEXT("energy_changed");
-	const FName EV_DamageDealt     = TEXT("damage_dealt");
-	const FName EV_Dodged          = TEXT("dodged");
-	const FName EV_Healed          = TEXT("healed");
-	const FName EV_BlockGained     = TEXT("block_gained");
-	const FName EV_BlockCleared    = TEXT("block_cleared");
-	const FName EV_UnitDied        = TEXT("unit_died");
-	const FName EV_UnitMoved       = TEXT("unit_moved");
-	const FName EV_UnitRotated     = TEXT("unit_rotated");
-	const FName EV_Knockback       = TEXT("knockback");
-	const FName EV_WallSlam        = TEXT("wall_slam");
-	const FName EV_Trampled        = TEXT("trampled");
-	const FName EV_StatusApplied   = TEXT("status_applied");
-	const FName EV_StatusRemoved   = TEXT("status_removed");
-	const FName EV_StatusTicked    = TEXT("status_ticked");
-	const FName EV_CardsDrawn      = TEXT("cards_drawn");
-	const FName EV_CardDiscarded   = TEXT("card_discarded");
-	const FName EV_CardExhausted   = TEXT("card_exhausted");
-	const FName EV_DeckReshuffled  = TEXT("deck_reshuffled");
-	const FName EV_TerrainChanged  = TEXT("terrain_changed");
-	const FName EV_HazardTriggered = TEXT("hazard_triggered");
-	const FName EV_PhaseChanged    = TEXT("phase_changed");
-	const FName EV_RoundAdvanced   = TEXT("round_advanced");
+	// 事件名的【唯一定义】在 Battle/HexBattleEventNames.h。
+	// 这里只做本地别名，让下面 28 个 LogEvent 点的写法不变。
+	//
+	// ⚠️ 不要在这里改回字面量。表现层要订阅同一批名字，
+	//    两边各写一份字符串时改名必然只改一边 ——
+	//    而 FName 比较失败是合法代码，不报错，只是特效不播了。
+	const FName& EV_EnergyChanged   = HexEv::EnergyChanged;
+	const FName& EV_DamageDealt     = HexEv::DamageDealt;
+	const FName& EV_Dodged          = HexEv::Dodged;
+	const FName& EV_Healed          = HexEv::Healed;
+	const FName& EV_BlockGained     = HexEv::BlockGained;
+	const FName& EV_BlockCleared    = HexEv::BlockCleared;
+	const FName& EV_UnitDied        = HexEv::UnitDied;
+	const FName& EV_UnitMoved       = HexEv::UnitMoved;
+	const FName& EV_UnitRotated     = HexEv::UnitRotated;
+	const FName& EV_Knockback       = HexEv::Knockback;
+	const FName& EV_WallSlam        = HexEv::WallSlam;
+	const FName& EV_Trampled        = HexEv::Trampled;
+	const FName& EV_StatusApplied   = HexEv::StatusApplied;
+	const FName& EV_StatusRemoved   = HexEv::StatusRemoved;
+	const FName& EV_StatusTicked    = HexEv::StatusTicked;
+	const FName& EV_CardsDrawn      = HexEv::CardsDrawn;
+	const FName& EV_CardDiscarded   = HexEv::CardDiscarded;
+	const FName& EV_CardExhausted   = HexEv::CardExhausted;
+	const FName& EV_DeckReshuffled  = HexEv::DeckReshuffled;
+	const FName& EV_TerrainChanged  = HexEv::TerrainChanged;
+	const FName& EV_HazardTriggered = HexEv::HazardTriggered;
+	const FName& EV_PhaseChanged    = HexEv::PhaseChanged;
+	const FName& EV_RoundAdvanced   = HexEv::RoundAdvanced;
 
 	/**
 	 * 把伤害应用到单位上，并处理死亡。
@@ -60,8 +66,11 @@ namespace
 			}
 		}
 
+		int32 Overkill = 0;
 		if (ToHP > 0)
 		{
+			// 超杀量 = 打进 HP 的伤害超出剩余生命的部分（OnOverkill 用）
+			Overkill = FMath::Max(0, ToHP - Target.HP);
 			Target.HP = FMath::Max(0, Target.HP - ToHP);
 		}
 
@@ -77,7 +86,7 @@ namespace
 
 		if (bBlockBroken)
 		{
-			State.LogEvent(TEXT("block_broken"), SourceId, Target.Id);
+			State.LogEvent(HexEv::BlockBroken, SourceId, Target.Id);
 		}
 
 		// 死亡判定
@@ -86,7 +95,14 @@ namespace
 			Target.bIsAlive = false;
 			// 尸体不占格（§8.3）
 			State.Grid.ClearOccupancy(Target.Id);
-			State.LogEvent(EV_UnitDied, SourceId, Target.Id);
+
+			// IntA = 超杀量。环境伤害 / 处决没有超杀概念，填 0。
+			FHexBattleEvent Death;
+			Death.Type = EV_UnitDied;
+			Death.SourceUnitId = SourceId;
+			Death.TargetUnitId = Target.Id;
+			Death.IntA = Overkill;
+			State.LogEvent(Death);
 		}
 	}
 
@@ -174,6 +190,24 @@ namespace
 void FHexActionResolver::Execute(const FHexGameAction& Action, FHexBattleState& State)
 {
 	State.LogAction(Action);
+
+	// ── 表现意图盖章：在【入口】登记，由 LogEvent 自动盖到每条事件上
+	//
+	// ⚠️ 为什么用作用域登记，而不是在 28 个 LogEvent 点各写一遍赋值：
+	//    每个 handler 自己造 FHexBattleEvent，靠人手把 VfxId 抄进去
+	//    必然漏 —— 而漏掉的症状是"这个技能没特效"，不报错、不崩，
+	//    只能靠美术某天发现并反馈。更糟的是【新增动作类型】时
+	//    没有任何机制提醒作者"你还要抄这两行"。
+	//    在入口登记之后，任何 handler 写的任何事件都自动带上表现 id，
+	//    新动作类型免费获得这个行为。
+	//
+	// ⚠️ 必须是 RAII 作用域而不是 Set/Clear 两句：
+	//    handler 里有 early break（闪避、目标已死），
+	//    手写 Clear 会被 break 跳过，于是下一个动作的事件
+	//    盖上了上一个动作的特效 —— 表现为"特效张冠李戴"，
+	//    比没有特效更难排查。
+	const FHexBattleState::FVisualScope VisualScope(
+		State, Action.VfxId, Action.SfxId, Action.CastAnim);
 
 	switch (Action.Type)
 	{

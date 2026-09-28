@@ -29,6 +29,15 @@ struct HEXSPIRECORE_API FHexIntent
 	/** 追踪型意图锁定的单位 id */
 	int32 TrackedUnitId = -1;
 
+	/**
+	 * 本回合要施放的技能 id（空 = 走 profile 默认攻击）。
+	 *
+	 * ⚠️ 技能在 Decide() 阶段就【选定并冻结】，执行阶段只按这个 id 重放。
+	 *    若执行时重选，同一个预警可能放出另一个技能 ——
+	 *    玩家看到的范围与实际打到的范围不一致，「意图是承诺」直接作废。
+	 */
+	FName SkillId;
+
 	/** 冻结的预计伤害（显示用，也是执行时的实际值） */
 	int32 PredictedDamage = 0;
 
@@ -100,6 +109,47 @@ public:
 
 	/** -1 表示用体型默认值 */
 	int32 KnockbackResistOverride = -1;
+
+	// ── 敌人可配置项（由 FHexEnemyData 拷入，见 MakeEnemyUnit）
+	//
+	// ⚠️ 为什么拷到单位上而不是让 AI 去查 FHexContentLibrary：
+	//    core 刻意不让战斗逻辑依赖具体内容 —— BattleFlow 查卡牌走的是
+	//    注入的 CardLookup 回调，就是这个原因。AI 直接 include 内容库会
+	//    把"战斗"与"第一版的四只怪"焊死，验证器再也无法构造一只
+	//    "射程 5 的测试怪"来单测射程逻辑。
+	//    拷贝的另一个好处：这些值进了 Serialize，存档/回放自带它们。
+
+	/** 每回合移动格数预算 */
+	int32 MoveBudget = 2;
+
+	/** 风筝型的理想距离（只对 RangedKiter 有意义） */
+	int32 PreferredDistance = 3;
+
+	/** 攻击射程覆写；-1 = 用 AIProfile 默认射程 */
+	int32 AttackRangeOverride = -1;
+
+	/** 可用技能 id 列表，已按优先级降序排好（顺序即选取顺序） */
+	TArray<FName> SkillIds;
+
+	/**
+	 * 技能冷却剩余回合数，与 SkillIds 一一对应（同下标）。
+	 *
+	 * ⚠️ 用平行数组而不是 TMap<FName,int32>：
+	 *    TMap 的遍历顺序不保证，而"选第一条可用技能"必须是确定性的。
+	 *    纪律 5 明确禁止依赖容器内部顺序做逻辑判断。
+	 */
+	TArray<int32> SkillCooldowns;
+
+	// ───────────────────────────────────────────── 技能
+
+	/** 某技能的剩余冷却；未配置该技能则返回 0 */
+	int32 GetSkillCooldown(FName InSkillId) const;
+
+	/** 置某技能的冷却（施放成功后调用） */
+	void SetSkillCooldown(FName InSkillId, int32 Rounds);
+
+	/** 全部技能冷却 -1（回合总结束时调用） */
+	void TickSkillCooldowns();
 
 	// ───────────────────────────────────────────── 几何
 

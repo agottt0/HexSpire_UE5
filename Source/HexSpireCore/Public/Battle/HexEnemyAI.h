@@ -26,6 +26,7 @@
 class FHexBattleState;
 class FHexUnit;
 class FHexActionQueue;
+struct FHexEnemySkillData;
 
 struct HEXSPIRECORE_API FHexEnemyAI
 {
@@ -43,6 +44,22 @@ struct HEXSPIRECORE_API FHexEnemyAI
 
 	/** 为全部存活敌人生成意图（按行动顺序，确定性） */
 	static void DecideAll(FHexBattleState& State);
+
+	/**
+	 * 重放一条已冻结的技能。由 ExecuteIntent 在 Intent.SkillId 非空时调用。
+	 *
+	 * ⚠️ 只重放，不重选也不重算波及格 —— Decide 与 Execute 之间玩家
+	 *    已经走位过了，在这里重算等于让敌人"看完玩家的应对再决定打哪"。
+	 *
+	 * ⚠️ public 只是为了让 VerifyAI 能直接单测它。
+	 *    业务代码一律走 ExecuteIntent，不要绕过意图直接放技能 ——
+	 *    那样冻结的目标格就失去意义了。
+	 */
+	static void ExecuteSkill(
+		FHexBattleState& State,
+		FHexUnit& Enemy,
+		const FHexEnemySkillData& Skill,
+		FHexActionQueue& Queue);
 
 	/**
 	 * 预计伤害（意图显示用）。

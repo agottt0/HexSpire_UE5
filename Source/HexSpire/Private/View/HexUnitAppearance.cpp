@@ -60,6 +60,11 @@ const TCHAR* FHexUnitAppearance::PathFor(EHexUnitAnim Anim) const
 	case EHexUnitAnim::Shoot:  return ShootPath;
 	case EHexUnitAnim::GetHit: return GetHitPath;
 	case EHexUnitAnim::Die:    return DiePath;
+
+	// None（内容没声明）与 Count 一律回到 Idle。
+	// ⚠️ 返回 nullptr 会让调用方以为"资产加载失败"并打 Warning，
+	//    而"内容没声明动作"在灰盒期是常态，不是错误 ——
+	//    把它当错误会让日志被噪声淹没，真正的缺资产反而看不见。
 	default:                   return IdlePath;
 	}
 }

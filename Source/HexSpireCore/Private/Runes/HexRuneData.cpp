@@ -82,6 +82,19 @@ void FHexRuneLoadout::GetRunesInOrder(TArray<TPair<int32, const FHexRuneData*>>&
 	}
 }
 
+void FHexRuneLoadout::GetInjectedCardIds(TArray<FName>& Out) const
+{
+	Out.Reset();
+
+	for (int32 I = 0; I < SlotCount; ++I)
+	{
+		if (Slots[I] != nullptr)
+		{
+			Out.Append(Slots[I]->InjectedCardIds);
+		}
+	}
+}
+
 FHexRuneLoadout::FAggregated FHexRuneLoadout::AggregateRule(EHexGameRule Rule) const
 {
 	FAggregated Result;

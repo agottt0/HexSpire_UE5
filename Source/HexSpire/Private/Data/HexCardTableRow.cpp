@@ -48,6 +48,7 @@ FHexCardData FHexCardTableRow::ToCardData(FName InId) const
 	C.Rarity = Rarity;
 	C.EnergyCost = EnergyCost;
 	C.Tags = Tags;
+	C.CastAnim = CastAnim;
 	C.TargetSpec = TargetSpec.ToTargetSpec();
 
 	C.Effects.Reserve(Effects.Num());
@@ -75,6 +76,7 @@ void FHexCardTableRow::FromCardData(const FHexCardData& In)
 	Rarity = In.Rarity;
 	EnergyCost = In.EnergyCost;
 	Tags = In.Tags;
+	CastAnim = In.CastAnim;
 
 	TargetSpec.Shape = In.TargetSpec.Shape;
 	TargetSpec.RangeMin = In.TargetSpec.RangeMin;

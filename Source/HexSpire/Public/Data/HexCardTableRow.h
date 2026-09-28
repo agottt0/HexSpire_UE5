@@ -239,6 +239,20 @@ struct HEXSPIRE_API FHexCardTableRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "基础")
 	TArray<FName> Tags;
 
+	/**
+	 * 打出这张卡时施法者播的动作。
+	 *
+	 * ⚠️ 这一列【必须存在于表里】，哪怕大部分行留 None。
+	 *    覆写是整行替换（见本文件顶部），表里缺这一列时
+	 *    代码内建的 CastAnim 会被静默冲成 None ——
+	 *    症状是"给卡配了动作，但游戏里角色不动"，
+	 *    而且查代码怎么看都是对的。这个坑已经踩过一次。
+	 *
+	 * None = 不声明，表现层按事件类型兜底（灰盒期的正常状态）。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "基础")
+	EHexUnitAnim CastAnim = EHexUnitAnim::None;
+
 	// ═════════════════════════════════════ 目标与效果
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "目标")

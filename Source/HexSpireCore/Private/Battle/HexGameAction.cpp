@@ -22,6 +22,20 @@ void FHexGameAction::Serialize(FArchive& Ar)
 	Ar << CoordA << CoordB;
 	Ar << bFlagA << bFlagB;
 	Ar << SourceTag;
+
+	// ⚠️ 追加在末尾（字段顺序是存档协议）。
+	//    这三个是表现意图，刻意【不】进 ActionLogHash ——
+	//    确定性哈希只该覆盖影响结算的字段。把特效 id 混进去会让
+	//    "换了个音效"被判定为"逻辑不一致"，那个断言就废了。
+	Ar << VfxId;
+	Ar << SfxId;
+
+	uint8 Anim = static_cast<uint8>(CastAnim);
+	Ar << Anim;
+	if (Ar.IsLoading())
+	{
+		CastAnim = static_cast<EHexUnitAnim>(Anim);
+	}
 }
 
 FString FHexGameAction::ToDebugString() const
@@ -240,13 +254,63 @@ FHexGameAction FHexActions::AdvanceRound()
 
 // ───────────────────────────────────────────────────────── FHexActionQueue
 
-void FHexActionQueue::PushBack(const FHexGameAction& Action)
+// ══════════════════════════════════════════════════════ 表现意图盖章
+
+FHexActionQueue::FVisualScope::FVisualScope(
+	FHexActionQueue& InQueue, FName Vfx, FName Sfx, EHexUnitAnim Anim)
+	: Queue(InQueue)
+	, PrevVfx(InQueue.ScopeVfxId)
+	, PrevSfx(InQueue.ScopeSfxId)
+	, PrevAnim(InQueue.ScopeCastAnim)
 {
-	Actions.Add(Action);
+	Queue.ScopeVfxId = Vfx;
+	Queue.ScopeSfxId = Sfx;
+	Queue.ScopeCastAnim = Anim;
 }
 
-void FHexActionQueue::PushNext(const FHexGameAction& Action)
+FHexActionQueue::FVisualScope::~FVisualScope()
 {
+	// 还原到上一层而不是清空 —— 这一层的嵌套是合法且常见的
+	// （一个 step 的效果里可以再触发子效果）。清空会让外层
+	// 剩下的动作丢掉特效，表现为"连击的第一段有特效，后面没有"。
+	Queue.ScopeVfxId = PrevVfx;
+	Queue.ScopeSfxId = PrevSfx;
+	Queue.ScopeCastAnim = PrevAnim;
+}
+
+void FHexActionQueue::StampVisual(FHexGameAction& Action) const
+{
+	// ⚠️ 只在动作【没有自己填】时才盖。
+	//    少数动作需要与所属 step 不同的表现（例如击退撞墙的额外音效），
+	//    调用方显式填的值必须胜出，否则那条特殊化被无声覆盖。
+	if (Action.VfxId.IsNone())
+	{
+		Action.VfxId = ScopeVfxId;
+	}
+	if (Action.SfxId.IsNone())
+	{
+		Action.SfxId = ScopeSfxId;
+	}
+	if (Action.CastAnim == EHexUnitAnim::None)
+	{
+		Action.CastAnim = ScopeCastAnim;
+	}
+}
+
+// ══════════════════════════════════════════════════════ 入队
+
+void FHexActionQueue::PushBack(const FHexGameAction& Action)
+{
+	FHexGameAction A = Action;
+	StampVisual(A);
+	Actions.Add(A);
+}
+
+void FHexActionQueue::PushNext(const FHexGameAction& InAction)
+{
+	FHexGameAction Action = InAction;
+	StampVisual(Action);
+
 	if (!bResolving || CursorIndex < 0)
 	{
 		// 不在结算过程中，等价于 PushBack

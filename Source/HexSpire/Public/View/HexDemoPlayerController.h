@@ -28,6 +28,19 @@ public:
 	virtual void SetupInputComponent() override;
 	virtual void PlayerTick(float DeltaTime) override;
 
+	/**
+	 * 控制台调试命令：`HexRune` 直接拿一个符文（跳过层结算）。
+	 *
+	 * 用法：按 ~ 打开控制台
+	 *   HexRune                → 自动挑第一个未持有的非诅咒符文
+	 *   HexRune rune_whetstone → 指定 id（id 列表见 DT_Runes 的行名）
+	 *
+	 * ⚠️ 只是调试后门。正式获取是层 Boss 的三选一（§6.6）——
+	 *    它存在的理由是"验证符文 UI / 触发链不该要求先打通一整层"。
+	 */
+	UFUNCTION(Exec)
+	void HexRune(const FString& RuneId = TEXT(""));
+
 	/** 鼠标当前指向的格；bValid 为 false 表示指到棋盘外 */
 	FIntVector GetHoveredCell(bool& bValid) const;
 

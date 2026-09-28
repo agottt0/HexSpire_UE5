@@ -848,10 +848,46 @@ namespace
 
 // ═════════════════════════════════════════════════════════════ 查询接口
 
+namespace
+{
+	/**
+	 * 可变存储 —— 配表覆写的落点。
+	 *
+	 * ⚠️ 名字带 Rune 前缀：unity build 下匿名命名空间同名符号会撞车
+	 *    （HexContentLibrary.cpp 顶部有同一个坑的记录）。
+	 */
+	TArray<FHexRuneData>& RuneMutableStorage()
+	{
+		static TArray<FHexRuneData> Runes = BuildAllRunes();
+		return Runes;
+	}
+}
+
 const TArray<FHexRuneData>& FHexRuneLibrary::AllRunes()
 {
-	static const TArray<FHexRuneData> Runes = BuildAllRunes();
-	return Runes;
+	return RuneMutableStorage();
+}
+
+bool FHexRuneLibrary::OverrideRune(const FHexRuneData& Rune)
+{
+	TArray<FHexRuneData>& Runes = RuneMutableStorage();
+
+	for (FHexRuneData& R : Runes)
+	{
+		if (R.Id == Rune.Id)
+		{
+			R = Rune;
+			return true;
+		}
+	}
+
+	Runes.Add(Rune);
+	return false;
+}
+
+void FHexRuneLibrary::ResetRuneOverrides()
+{
+	RuneMutableStorage() = BuildAllRunes();
 }
 
 const FHexRuneData* FHexRuneLibrary::FindRune(FName Id)

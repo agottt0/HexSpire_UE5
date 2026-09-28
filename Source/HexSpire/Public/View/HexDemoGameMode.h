@@ -32,9 +32,19 @@
 #include "Battle/HexBattleFlow.h"
 #include "Rng/HexRngStreams.h"
 
+// ⚠️ 这两个必须【完整包含】而不能前置声明。
+//    TUniquePtr<T> 的析构要求 T 是完整类型，而本类的析构函数是
+//    编译器隐式生成的 —— 生成点就在这个头文件里。
+//    只前置声明会得到 C4150「删除指向不完整类型的指针」，
+//    在 /WX 下直接编译失败（而且报错位置在 UniquePtr.h 里，
+//    看起来像引擎的问题，实际原因在这里）。
+#include "View/HexVisualQueue.h"
+#include "Fx/HexFxRuntime.h"
+
 #include "HexDemoGameMode.generated.h"
 
 class AHexBoardVisual;
+class UHexFxLibraryAsset;
 class AHexUnitVisual;
 struct FHexCardData;
 
@@ -78,6 +88,16 @@ public:
 
 	bool IsPlayerDefeated() const;
 
+	/** 当前房间类型（HUD 的胜负横幅要区分 Boss 击破与普通胜利） */
+	EHexRoomType GetCurrentRoomType() const { return CurrentRoomType; }
+
+	/**
+	 * 某符文槽触发闪烁的当前强度 0..1（1 = 刚触发，随时间衰减到 0）。
+	 * 供符文卡做脉冲动画 —— 符文生效必须有可见反馈，
+	 * 否则玩家无法把"效果发生了"与"哪个符文干的"对上（R8）。
+	 */
+	float GetRuneFlashStrength(int32 SlotIndex) const;
+
 	/** 战斗胜利后：结算并回到地图 */
 	void FinishBattleAndReturnToMap();
 
@@ -106,6 +126,28 @@ public:
 
 	/** 营地休息 */
 	void RestAtCamp();
+
+	/**
+	 * 交换两个符文槽位（§6.5 顺序即策略）。
+	 *
+	 * ⚠️ 表现层只发输入：锁定判定（战斗中禁止重排）在
+	 *    FHexRunState::ReorderRune 里，这里不重复判 ——
+	 *    两边各写一套判断迟早漂移（同 CanEndTurn 的教训）。
+	 *
+	 * @return 是否成功（战斗中 / 越界返回 false）
+	 */
+	bool RequestRuneReorder(int32 SlotA, int32 SlotB);
+
+	/**
+	 * 调试：直接发一个符文（跳过层结算）。
+	 *
+	 * ⚠️ 只给控制台命令用（HexRune，见 PlayerController）。
+	 *    正式获取路径是层 Boss 的三选一 —— 这个后门存在的理由是
+	 *    "验证符文 UI / 触发链不该要求先打通一整层"。
+	 *
+	 * @param RuneIdStr 符文 id；空串 = 自动挑第一个未持有的
+	 */
+	bool DebugGrantRune(const FString& RuneIdStr);
 
 	// ═══════════════════════════════════════════ 战斗操作
 
@@ -174,6 +216,17 @@ private:
 	UPROPERTY()
 	TMap<int32, AHexUnitVisual*> UnitVisuals;
 
+	// ── 表现回放（纯 C++，同样不参与 GC）
+	//
+	// ⚠️ 特效库资产本身要 UPROPERTY 持有（见下），
+	//    否则 GC 会在战斗中途回收它 —— 表现为"打了几回合特效突然没了"。
+	TUniquePtr<FHexFxRuntime> FxRuntime;
+	TUniquePtr<FHexVisualQueue> VisualQueue;
+
+	/** 持有特效库的强引用，防 GC */
+	UPROPERTY()
+	const UHexFxLibraryAsset* FxLibraryKeepAlive = nullptr;
+
 	// ── 逻辑层（TUniquePtr：core 是纯 C++ 类，不参与 UObject GC）
 	TUniquePtr<FHexRngStreams> Rng;
 	TUniquePtr<FHexRunState> RunState;
@@ -203,4 +256,34 @@ private:
 
 	TArray<FHexRewardOption> PendingRewards;
 	bool bAwaitingRewardChoice = false;
+
+	/**
+	 * Boss 已倒，奖励处理完（选定或放弃）后进下一层。
+	 *
+	 * ⚠️ 这个标志曾【不存在】：打赢 Boss、选完奖励后没有任何代码
+	 *    推进层数 —— 玩家永远卡在打完的第一层，符文获取链在
+	 *    "第二次层结算"处断掉。层推进挂在奖励处理完之后而不是
+	 *    Boss 倒下瞬间，是因为 GenerateFloorRewards 读的是
+	 *    【当前层】的腐蚀度与持有列表，先换层再选奖励会算错。
+	 */
+	bool bAdvanceFloorAfterRewards = false;
+
+	/** 层推进的执行处（重置地图、层统计；腐蚀度刻意跨层继承） */
+	void AdvanceToNextFloor();
+
+	/**
+	 * 符文触发的闪烁时间戳（World 秒），下标 = 槽位 0..5。
+	 * 在 Tick 的事件 Drain 处记录（rune_triggered 事件的 IntB = 槽位号）。
+	 */
+	float RuneFlashTime[6] = {};
+
+	/**
+	 * 战斗分出胜负时更新状态提示。
+	 *
+	 * ⚠️ 必须在【每个】能改变战场的入口末尾调用（PlayCard / EndTurn）。
+	 *    原先只有 EndTurn 检查 —— 而最常见的胜利方式恰恰是
+	 *    打出卡牌当场杀掉最后一个敌人：那条路径上什么都不显示，
+	 *    玩家清完场毫无反馈，以为游戏卡住了。
+	 */
+	void AnnounceBattleOutcomeIfOver();
 };

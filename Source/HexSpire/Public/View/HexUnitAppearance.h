@@ -69,17 +69,12 @@ namespace HexEngineAssets
 	inline const TCHAR* Cube     = TEXT("/Engine/BasicShapes/Cube.Cube");
 }
 
-/** 单位的动画状态。刻意做得很小 —— 回合制只需要这几个。 */
-enum class EHexUnitAnim : uint8
-{
-	Idle,
-	Walk,
-	Attack,
-	Cast,
-	Shoot,
-	GetHit,
-	Die,
-};
+// ⚠️ EHexUnitAnim 已上移到 Core/HexSpireEnums.h。
+//    原因：技能要能在【内容定义】里声明"我该播哪种动作"（§13.2 的
+//    可预判性要求），而内容定义在逻辑层。枚举不引用资产，
+//    所以上移不破坏 core 的依赖边界。
+//    这里【不要】再定义一份 —— 两份同名枚举会让
+//    "表现层的 Attack" 与 "逻辑层的 Attack" 在数值上悄悄错位。
 
 /**
  * 一套角色外观（模型 + 动画）。

@@ -134,6 +134,24 @@ struct HEXSPIRECORE_API FHexGameAction
 	/** 来源标记（"rune:slot3" / "card:heavy_strike" / "hazard"），写进日志 */
 	FString SourceTag;
 
+	// ── 表现意图（逻辑层不消费，只负责搬运）
+	//
+	// ⚠️ 为什么表现 id 要跟着【动作】走，而不是让表现层按事件类型去猜：
+	//    一张连击卡的三段、一个技能的多个 step，各自可以有不同的特效。
+	//    事件类型只说"造成了伤害"，说不出"该播哪个斩击" ——
+	//    让表现层反推等于把配置权从策划手里拿走塞回代码里，
+	//    而"只需配置资产即可"正是这套管线存在的理由。
+	//
+	// ⚠️ 这两个是 FName 而不是资产引用或路径。core 不解释它们，
+	//    只是把内容定义里的名字转交给事件日志 ——
+	//    一旦这里出现 TSoftObjectPtr 或 /Game/ 路径，
+	//    core 就依赖了 Engine，headless 验证体系立刻失效。
+	FName VfxId;
+	FName SfxId;
+
+	/** 施法者该播的动作。由内容声明（§13.2：玩家要能从动作预判意图）。 */
+	EHexUnitAnim CastAnim = EHexUnitAnim::None;
+
 	void Serialize(FArchive& Ar);
 
 	FString ToDebugString() const;
@@ -210,6 +228,44 @@ public:
 	bool IsEmpty() const { return Actions.Num() == 0; }
 	int32 Num() const { return Actions.Num(); }
 
+	/**
+	 * 表现意图的作用域登记 —— 供 ExecuteStep 在处理一个效果步骤前构造。
+	 *
+	 * 作用域存续期间，PushBack / PushNext 推入的动作若自身没填
+	 * VfxId / SfxId / CastAnim，就自动继承这里登记的值。
+	 *
+	 * ══════════════════════════════════════════════════════════════
+	 * 为什么盖章要在【队列】这一层，而不是在每个 Push 点手写
+	 * ══════════════════════════════════════════════════════════════
+	 * ExecuteStep 的 switch 里有 10 个 Push 点，敌人技能路径还有一批。
+	 * 靠人手在每处把 Step.VfxId 抄进 action，漏掉的症状是
+	 * "这个 op 没有特效" —— 不报错、不崩，只能靠美术某天发现。
+	 * 更要命的是【新增一个 EHexEffectOp 分支】时没有任何机制
+	 * 提醒作者"你还要抄这两行"，而新增 op 是最频繁的扩展动作。
+	 *
+	 * 在队列层盖章之后，"某个 op 忘了带特效" 这类缺陷从
+	 * "每个分支各自可能犯" 变成 "结构上不可能犯"。
+	 */
+	class HEXSPIRECORE_API FVisualScope
+	{
+	public:
+		FVisualScope(FHexActionQueue& InQueue, FName Vfx, FName Sfx, EHexUnitAnim Anim);
+		~FVisualScope();
+
+		FVisualScope(const FVisualScope&) = delete;
+		FVisualScope& operator=(const FVisualScope&) = delete;
+
+	private:
+		FHexActionQueue& Queue;
+
+		// 上一层的值。ExecuteStep 可能在符文子效果里再套一层，
+		// 所以这里【必须】支持嵌套还原 —— 与 BattleState 那个
+		// 不支持嵌套的作用域不同，原因是这一层天然会嵌套。
+		FName PrevVfx;
+		FName PrevSfx;
+		EHexUnitAnim PrevAnim;
+	};
+
 	void Reset();
 
 	/**
@@ -237,4 +293,17 @@ private:
 	 *    没有这个偏移的话，符文槽 1 产出的 3 个子动作会被倒序执行。
 	 */
 	int32 PendingInsertOffset = 0;
+
+	// ── 当前效果步骤的表现意图（FVisualScope 管理）
+	//
+	// ⚠️ 不进 Serialize：队列在两次结算之间应当是空的，
+	//    这几个字段是"正在翻译某个 step"的瞬时上下文。
+	FName ScopeVfxId;
+	FName ScopeSfxId;
+	EHexUnitAnim ScopeCastAnim = EHexUnitAnim::None;
+
+	/** 给入队动作盖上当前作用域的表现意图（动作自填的值优先） */
+	void StampVisual(FHexGameAction& Action) const;
+
+	friend class FVisualScope;
 };

@@ -481,6 +481,13 @@ namespace
 		case EHexTriggerTiming::OnDodge:          return TEXT("OnDodge");
 		case EHexTriggerTiming::OnUnitDeath:      return TEXT("OnUnitDeath");
 		case EHexTriggerTiming::OnBattleWin:      return TEXT("OnBattleWin");
+		case EHexTriggerTiming::OnEnergySpent:    return TEXT("OnEnergySpent");
+		case EHexTriggerTiming::OnOverkill:       return TEXT("OnOverkill");
+		case EHexTriggerTiming::OnRotate:         return TEXT("OnRotate");
+		case EHexTriggerTiming::OnStatusTick:     return TEXT("OnStatusTick");
+		case EHexTriggerTiming::OnStatusExpired:  return TEXT("OnStatusExpired");
+		case EHexTriggerTiming::OnTerrainChanged: return TEXT("OnTerrainChanged");
+		case EHexTriggerTiming::OnEnterHazard:    return TEXT("OnEnterHazard");
 		default:                                  return TEXT("?");
 		}
 	}
@@ -518,6 +525,22 @@ namespace
 			case EHexTriggerTiming::OnBlockBroken:
 				// 需要敌人正好打穿玩家格挡，回合数不足时可能不发生
 				return TEXT("需格挡被打穿");
+			case EHexTriggerTiming::OnRotate:
+				// 需要玩家主动转向；探针机器人只出牌不转身
+				return TEXT("探针不做转向操作");
+			case EHexTriggerTiming::OnStatusTick:
+				// 需要持续伤害状态在场跳伤；探针的机器人出牌
+				// 不保证打出《点燃》并命中
+				return TEXT("需持续伤害状态跳伤");
+			case EHexTriggerTiming::OnStatusExpired:
+				// 需要状态自然到期；探针只跑 4 回合，不保证赶上
+				return TEXT("需状态自然到期");
+			case EHexTriggerTiming::OnTerrainChanged:
+				// 需要改地形效果；探针卡组里没有
+				return TEXT("需改地形效果");
+			case EHexTriggerTiming::OnEnterHazard:
+				// open_hall 布局没有危害地形
+				return TEXT("探针布局无危害地形");
 			default:
 				return nullptr;
 			}

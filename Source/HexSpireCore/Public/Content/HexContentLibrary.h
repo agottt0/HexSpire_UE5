@@ -50,7 +50,13 @@ struct HEXSPIRECORE_API FHexHeroData
 	FString PassiveText;
 };
 
-/** 敌人定义 */
+/**
+ * 敌人定义（§15.8）。
+ *
+ * ⚠️ 六属性是【第 1 层、腐蚀度 0】的基线值。MakeEnemyUnit 会按层数与
+ *    腐蚀度缩放 HP/ATK（DEF/AGI 刻意不缩放，见那边注释）。
+ *    配表时填的是基线，不要预先把难度加成算进去 —— 那会被缩放二次放大。
+ */
 struct HEXSPIRECORE_API FHexEnemyData
 {
 	FName Id;
@@ -71,6 +77,48 @@ struct HEXSPIRECORE_API FHexEnemyData
 	bool bIsBoss = false;
 	int32 KnockbackResistOverride = -1;
 
+	/**
+	 * 技能列表（按 id 引用 FHexEnemySkillLibrary）。
+	 *
+	 * ⚠️ 留空 = 走 profile 默认攻击（AttackRangeOf + 1.0×ATK），
+	 *    行为与「技能系统存在之前」完全一致。
+	 *    这是刻意的默认值：现有四只敌人的数值是实测调过的，
+	 *    不该因为多了一套技能框架而被动改变。
+	 *
+	 * ⚠️ 引用了不存在的技能 id 时会记一条警告并【跳过该 id】，
+	 *    而不是让敌人整场站着不动。由 VerifyContent 的引用完整性断言钉住。
+	 */
+	TArray<FName> SkillIds;
+
+	/**
+	 * 移动力（每回合可走的格数预算）。
+	 *
+	 * ⚠️ 曾经硬编码为 2（见 ComputeMoveTarget 的 Budget）。
+	 *    提出来配表之后，「慢速重装」与「高速游走」才能靠数据区分 ——
+	 *    而这正是 AGI 之外唯一能表达"这只怪逼得多紧"的旋钮。
+	 */
+	int32 MoveBudget = 2;
+
+	/**
+	 * 风筝型的理想距离（离目标多远就不再靠近）。
+	 *
+	 * 只对 RangedKiter 有意义；其他 profile 一律贴近到 1。
+	 * ⚠️ 填得比攻击射程还大会让敌人永远进不了射程 → 整场只后退。
+	 *    由 VerifyContent 断言 PreferredDistance <= 攻击射程。
+	 */
+	int32 PreferredDistance = 3;
+
+	/**
+	 * 攻击射程覆写。-1 = 用 AIProfile 的默认射程。
+	 *
+	 * ⚠️ 改这个值会直接影响「可躲型意图是否存在」。
+	 *    填 1 会让该敌人永远产不出可躲型攻击意图 ——
+	 *    两段明示规则规定距离 ≤1 一律转追踪（见 HexEnemyAI.cpp
+	 *    AttackRangeOf 里 Aggressive 射程为何是 2 的长注释）。
+	 *    §13.2 要求玩家能区分"能躲 / 不能躲"，全表都填 1 会让这条 UX 消失。
+	 */
+	int32 AttackRangeOverride = -1;
+
 	FString CodexText;
 };
 
@@ -87,6 +135,24 @@ struct HEXSPIRECORE_API FHexContentLibrary
 
 	static const FHexHeroData* FindHero(FName Id);
 	static const TArray<FHexHeroData>& AllHeroes();
+
+	/**
+	 * 用外部数据（DataTable）覆写/追加一个英雄。
+	 *
+	 * 语义与纪律与 OverrideCard 完全一致，见那边的长注释：
+	 * core 自己永远不调用，只有表现层的配表加载器会调；
+	 * 同 Id 则【整条替换】，新 Id 则追加。
+	 *
+	 * ⚠️ 必须在 StartNewRun 之前调用。RunState 会拷贝英雄数值，
+	 *    之后再覆写只会改到库里那份，本局纹丝不动 ——
+	 *    症状是"改表没生效，重开一局才对"。
+	 *
+	 * @return true = 覆写了已有英雄；false = 追加了新英雄
+	 */
+	static bool OverrideHero(const FHexHeroData& Hero);
+
+	/** 撤销全部英雄覆写，回到纯代码内建状态 */
+	static void ResetHeroOverrides();
 
 	// ═══════════════════════════════════════ 卡牌
 
@@ -155,11 +221,41 @@ struct HEXSPIRECORE_API FHexContentLibrary
 	static const TArray<FHexEnemyData>& AllEnemies();
 
 	/**
+	 * 用外部数据（DataTable）覆写/追加一个敌人。
+	 *
+	 * 语义与纪律同 OverrideCard。同 Id 整条替换，新 Id 追加。
+	 *
+	 * ⚠️ 覆写会让【已持有的 FHexEnemyData* 失效】（TArray 追加时重分配）。
+	 *    BeginBattleForRoom 在遭遇构造期间持有这些指针，
+	 *    所以只能在启动早期调用，不能在战斗中途。
+	 *
+	 * @return true = 覆写了已有敌人；false = 追加了新敌人
+	 */
+	static bool OverrideEnemy(const FHexEnemyData& Enemy);
+
+	/** 撤销全部敌人覆写，回到纯代码内建状态 */
+	static void ResetEnemyOverrides();
+
+	/**
 	 * 由敌人定义构造战场单位，含层数与腐蚀度缩放。
 	 * @param FloorIndex 层数（1 起）
 	 * @param Corruption 腐蚀度（§9.4：每 +1 敌人 HP/ATK 提升一档）
 	 */
 	static FHexUnit MakeEnemyUnit(const FHexEnemyData& Data, int32 FloorIndex, int32 Corruption);
+
+	/**
+	 * 取敌人已配置的技能（跳过引用不到的 id，按优先级降序 + id 字典序）。
+	 *
+	 * ⚠️ 返回排好序的指针数组而非让调用方自己排 ——
+	 *    AI 的选技能逻辑依赖这个顺序的确定性，散落在调用方会漂移。
+	 */
+	static void GetEnemySkills(
+		const FHexEnemyData& Data, TArray<const struct FHexEnemySkillData*>& Out);
+
+	// ═══════════════════════════════════════ 敌人技能（转发到 HexEnemySkillLibrary）
+
+	static const struct FHexEnemySkillData* FindEnemySkill(FName Id);
+	static const TArray<struct FHexEnemySkillData>& AllEnemySkills();
 
 	// ═══════════════════════════════════════ 怪物组
 

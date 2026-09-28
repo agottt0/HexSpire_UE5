@@ -175,6 +175,20 @@ struct HEXSPIRECORE_API FHexCardData
 	bool bCountsTowardCapacity = true;
 	int32 MaxCopiesInDeck = 3;
 
+	/**
+	 * 施法者打出这张卡时该播的动作。
+	 *
+	 * ⚠️ 为什么这是【内容字段】而不是让表现层按 CardType 推：
+	 *    §13.2 要求玩家能从动作预判意图。按 CardType 推的话，
+	 *    同为 Attack 的近战重击与远程飞弹会播同一个动作 ——
+	 *    而"这张卡是贴身砍还是隔空放"恰恰是玩家最需要的预判信息。
+	 *    表现层推不出来，只有内容作者知道。
+	 *
+	 * None = 没声明，表现层按 CardType 取一个保守默认（不是不播）。
+	 * 灰盒期留空是常态。
+	 */
+	EHexUnitAnim CastAnim = EHexUnitAnim::None;
+
 	/** 描述模板，运行时填入实算值。例："造成 {dmg} 伤害并击退 {kb} 格" */
 	FString DescriptionTemplate;
 

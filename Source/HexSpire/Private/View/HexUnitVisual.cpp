@@ -35,6 +35,8 @@
 #include "View/HexUnitVisual.h"
 #include "View/HexBoardVisual.h"
 #include "View/HexUnitAppearance.h"
+#include "Data/HexUnitTableLoader.h"
+#include "Data/HexUnitVisualSet.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/StaticMesh.h"
@@ -213,6 +215,18 @@ FLinearColor AHexUnitVisual::ColorForTeam(EHexTeam Team, bool bIsElite, bool bIs
 	return FLinearColor(0.60f, 0.25f, 0.25f);       // 暗红：杂兵
 }
 
+FRotator AHexUnitVisual::ComposeFacing(float Yaw) const
+{
+	// 先应用美术朝向修正（模型坐标系拧正），再叠加战术朝向。
+	// 顺序不能反 —— 修正必须在里层，否则模型转身时修正轴也跟着转。
+	const FRotator Fix = VisualSet ? VisualSet->MeshRotation : FRotator::ZeroRotator;
+	if (Fix.IsNearlyZero())
+	{
+		return FRotator(0.0f, Yaw, 0.0f);
+	}
+	return FRotator(FQuat(FRotator(0.0f, Yaw, 0.0f)) * FQuat(Fix));
+}
+
 // ══════════════════════════════════════════════════════════ 外观装配
 
 void AHexUnitVisual::EnsureAppearance(const FHexUnit& Unit)
@@ -225,28 +239,63 @@ void AHexUnitVisual::EnsureAppearance(const FHexUnit& Unit)
 
 	Look = &HexAppearance::For(Unit.Team, Unit.bIsElite, Unit.bIsBoss);
 
-	USkeletalMesh* Mesh = HexAppearance::LoadMesh(*Look);
+	// ── 单位专属外观资产优先（DA_UnitVisual_<SourceId>）
+	//
+	// 查不到不是错误 —— 灰盒期大部分单位没有专属资产，
+	// 回退到按队伍/等级选的路径式占位外观。
+	VisualSet = FHexUnitTableLoader::FindVisualSet(Unit.SourceId);
+
+	USkeletalMesh* Mesh = VisualSet ? VisualSet->LoadMesh() : nullptr;
+	if (!Mesh)
+	{
+		Mesh = HexAppearance::LoadMesh(*Look);
+	}
+
 	if (Mesh)
 	{
 		BodySkel->SetSkeletalMesh(Mesh);
 		bUsingSkeletalMesh = true;
 
+		// 美术位置修正（模型脚底没在原点时用它抬/沉）
+		BodySkel->SetRelativeLocation(
+			VisualSet ? VisualSet->MeshOffset : FVector::ZeroVector);
+
 		// 骨骼模型顶上了 → 灰盒圆柱退场
 		BodyMesh->SetVisibility(false);
 
 		// 预载常用动画。Idle 与 Die 必须有，其余可缺。
-		AnimIdle = HexAppearance::LoadAnim(*Look, EHexUnitAnim::Idle);
-		AnimWalk = HexAppearance::LoadAnim(*Look, EHexUnitAnim::Walk);
-		AnimGetHit = HexAppearance::LoadAnim(*Look, EHexUnitAnim::GetHit);
-		AnimDie = HexAppearance::LoadAnim(*Look, EHexUnitAnim::Die);
-		AnimAttack = HexAppearance::LoadAnim(*Look, EHexUnitAnim::Attack);
+		//
+		// ⚠️ DA 配了任何动画就【整套】走 DA（内部缺项回退 Idle），
+		//    否则整套走路径式。刻意不做逐项混配 —— DA 的模型可能是
+		//    自带骨架的专属怪（如 232 骨的 Siren），混入 108 骨的
+		//    模板动画会加载成功但播放时姿态错乱。
+		const bool bAnimsFromVisual = VisualSet && VisualSet->HasAnyAnim();
+		if (bAnimsFromVisual)
+		{
+			AnimIdle = VisualSet->LoadAnim(EHexUnitAnim::Idle);
+			AnimWalk = VisualSet->LoadAnim(EHexUnitAnim::Walk);
+			AnimGetHit = VisualSet->LoadAnim(EHexUnitAnim::GetHit);
+			AnimDie = VisualSet->LoadAnim(EHexUnitAnim::Die);
+			AnimAttack = VisualSet->LoadAnim(EHexUnitAnim::Attack);
+		}
+		else
+		{
+			AnimIdle = HexAppearance::LoadAnim(*Look, EHexUnitAnim::Idle);
+			AnimWalk = HexAppearance::LoadAnim(*Look, EHexUnitAnim::Walk);
+			AnimGetHit = HexAppearance::LoadAnim(*Look, EHexUnitAnim::GetHit);
+			AnimDie = HexAppearance::LoadAnim(*Look, EHexUnitAnim::Die);
+			AnimAttack = HexAppearance::LoadAnim(*Look, EHexUnitAnim::Attack);
+		}
 
 		// ⚠️ 成功时也要留一条日志。
 		//    资产回退是【静默】的 —— 画面上只是"变成了灰盒"，
 		//    如果不打日志，你会以为是自己没改对代码。
 		UE_LOG(LogHexSpire, Display,
-			TEXT("单位 %d 外观=骨骼模型 动画[idle=%d walk=%d hit=%d die=%d atk=%d]"),
-			Unit.Id, AnimIdle != nullptr, AnimWalk != nullptr,
+			TEXT("单位 %d 外观=%s 动画[来源=%s idle=%d walk=%d hit=%d die=%d atk=%d]"),
+			Unit.Id,
+			VisualSet ? TEXT("专属资产") : TEXT("路径式占位"),
+			bAnimsFromVisual ? TEXT("专属") : TEXT("模板"),
+			AnimIdle != nullptr, AnimWalk != nullptr,
 			AnimGetHit != nullptr, AnimDie != nullptr, AnimAttack != nullptr);
 
 		PlayAnim(EHexUnitAnim::Idle);
@@ -381,8 +430,12 @@ void AHexUnitVisual::SyncFromUnit(const FHexUnit& Unit, const AHexBoardVisual& B
 		if (bUsingSkeletalMesh)
 		{
 			// 按目标高度等比缩放。等比而非拉伸 —— 拉伸会让人形明显变形。
+			// DA 的 MeshScale 是【乘】上去的美术修正，不替代体型缩放：
+			// 体型（S/M/L）管规则占格，MeshScale 只管"模型本身偏大/偏小"。
 			const float S = Height / MannequinHeight;
-			BodySkel->SetRelativeScale3D(FVector(S));
+			const FVector ArtScale =
+				VisualSet ? VisualSet->MeshScale : FVector::OneVector;
+			BodySkel->SetRelativeScale3D(FVector(S) * ArtScale);
 		}
 
 		BodyMesh->SetRelativeScale3D(FVector(
@@ -405,6 +458,14 @@ void AHexUnitVisual::SyncFromUnit(const FHexUnit& Unit, const AHexBoardVisual& B
 	if (RingMaterial)
 	{
 		FLinearColor C = ColorForTeam(Unit.Team, Unit.bIsElite, Unit.bIsBoss);
+
+		// DA 的光圈色覆写（Alpha=0 表示不覆写）。
+		// 只换【基础色】—— 下面的 debuff 偏色仍然生效，
+		// 否则配了专属光圈色的单位会丢掉"有 debuff"这个必读信息。
+		if (VisualSet && VisualSet->RingColorOverride.A > 0.0f)
+		{
+			C = VisualSet->RingColorOverride;
+		}
 
 		// ⚠️ 受到 debuff 时偏色 —— 灰盒期没有状态图标，
 		//    但"这个敌人身上有 debuff"必须能看出来，否则玩家算不清伤害。
@@ -452,7 +513,8 @@ void AHexUnitVisual::SyncFromUnit(const FHexUnit& Unit, const AHexBoardVisual& B
 		TargetYaw = FMath::RadiansToDegrees(FMath::Atan2(D2.Y, D2.X));
 		if (!bHasTargetYaw)
 		{
-			BodySkel->SetRelativeRotation(FRotator(0.0f, TargetYaw, 0.0f));
+			SmoothedYaw = TargetYaw;
+			BodySkel->SetRelativeRotation(ComposeFacing(TargetYaw));
 			bHasTargetYaw = true;
 		}
 
@@ -558,14 +620,18 @@ void AHexUnitVisual::Tick(float DeltaSeconds)
 	}
 
 	// ── 朝向平滑
+	//
+	// ⚠️ 用 SmoothedYaw 而不是从组件读回 GetRelativeRotation().Yaw：
+	//    组件上的旋转是 ComposeFacing 合成过 MeshRotation 的，
+	//    读回的 Yaw ≠ 纯朝向角 —— 配了朝向修正的模型会永远"差一点"，
+	//    每帧都在转，看起来像抽搐。
 	if (bHasTargetYaw && bUsingSkeletalMesh)
 	{
-		const FRotator Cur = BodySkel->GetRelativeRotation();
-		if (!FMath::IsNearlyEqual(FRotator::NormalizeAxis(Cur.Yaw),
+		if (!FMath::IsNearlyEqual(FRotator::NormalizeAxis(SmoothedYaw),
 			FRotator::NormalizeAxis(TargetYaw), 0.5f))
 		{
-			const float NewYaw = FMath::FixedTurn(Cur.Yaw, TargetYaw, 720.0f * DeltaSeconds);
-			BodySkel->SetRelativeRotation(FRotator(0.0f, NewYaw, 0.0f));
+			SmoothedYaw = FMath::FixedTurn(SmoothedYaw, TargetYaw, 720.0f * DeltaSeconds);
+			BodySkel->SetRelativeRotation(ComposeFacing(SmoothedYaw));
 		}
 	}
 }

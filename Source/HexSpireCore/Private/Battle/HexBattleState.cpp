@@ -14,6 +14,22 @@ void FHexBattleEvent::Serialize(FArchive& Ar)
 	Ar << CoordA << CoordB;
 	Ar << bFlagA;
 	Ar << TextA;
+
+	// ⚠️ 追加在末尾，不要插到中间 —— 字段顺序是存档协议的一部分。
+	//    事件日志会进回放，插入会让旧存档按错位布局解读，
+	//    表现为"回放时特效乱飞"而不是报错。
+	Ar << VfxId;
+	Ar << SfxId;
+
+	// enum class 要经 uint8 往返（与 FHexUnit::Serialize 同一约定）。
+	// 直接 Ar << CastAnim 编译不过，而随手改成 int32 会让
+	// 字段宽度与其他枚举不一致，存档布局出现隐性差异。
+	uint8 Anim = static_cast<uint8>(CastAnim);
+	Ar << Anim;
+	if (Ar.IsLoading())
+	{
+		CastAnim = static_cast<EHexUnitAnim>(Anim);
+	}
 }
 
 // ───────────────────────────────────────────────────────── 构造
@@ -267,9 +283,61 @@ void FHexBattleState::RebuildRuleAggregate()
 
 // ───────────────────────────────────────────────────────── 事件日志
 
+// ══════════════════════════════════════════════════════ 表现意图作用域
+
+FHexBattleState::FVisualScope::FVisualScope(
+	FHexBattleState& InState, FName Vfx, FName Sfx, EHexUnitAnim Anim)
+	: State(InState)
+{
+	// 嵌套说明结算模型被改坏了（Resolver 应当逐个动作顺序执行）。
+	// 记违规而不是断言 —— 纪律：绝不因表现层的事把战斗弄崩。
+	if (State.bInVisualScope)
+	{
+		State.AddRuleViolation(TEXT("nested_visual_scope"),
+			TEXT("动作执行发生嵌套 —— 表现 id 会张冠李戴"));
+	}
+
+	State.ScopeVfxId = Vfx;
+	State.ScopeSfxId = Sfx;
+	State.ScopeCastAnim = Anim;
+	State.bInVisualScope = true;
+}
+
+FHexBattleState::FVisualScope::~FVisualScope()
+{
+	// 必须清空。留着会让下一个动作（它可能没有任何表现配置）
+	// 继承上一个动作的特效 —— 画面上有东西在播，
+	// 所以你不会怀疑是盖章串了，排查方向会完全跑偏。
+	State.ScopeVfxId = NAME_None;
+	State.ScopeSfxId = NAME_None;
+	State.ScopeCastAnim = EHexUnitAnim::None;
+	State.bInVisualScope = false;
+}
+
+// ══════════════════════════════════════════════════════ 事件日志
+
 void FHexBattleState::LogEvent(const FHexBattleEvent& Event)
 {
-	EventLog.Add(Event);
+	FHexBattleEvent E = Event;
+
+	// ⚠️ 只在事件【没有自己填】时才盖章。
+	//    少数事件需要盖与当前动作不同的表现（例如受击特效来自
+	//    被击者的外观而非技能），此时 handler 自己填的值必须胜出 ——
+	//    否则那条特殊化会被无声地覆盖掉。
+	if (E.VfxId.IsNone())
+	{
+		E.VfxId = ScopeVfxId;
+	}
+	if (E.SfxId.IsNone())
+	{
+		E.SfxId = ScopeSfxId;
+	}
+	if (E.CastAnim == EHexUnitAnim::None)
+	{
+		E.CastAnim = ScopeCastAnim;
+	}
+
+	EventLog.Add(E);
 }
 
 void FHexBattleState::LogEvent(FName Type, int32 SourceId, int32 TargetId)
@@ -278,7 +346,10 @@ void FHexBattleState::LogEvent(FName Type, int32 SourceId, int32 TargetId)
 	E.Type = Type;
 	E.SourceUnitId = SourceId;
 	E.TargetUnitId = TargetId;
-	EventLog.Add(E);
+
+	// 走完整版而非直接 Add —— 否则这条便捷路径上的事件拿不到盖章。
+	// 28 个 LogEvent 点里有一半用的是这个重载。
+	LogEvent(E);
 }
 
 void FHexBattleState::DrainEvents(TArray<FHexBattleEvent>& Out)

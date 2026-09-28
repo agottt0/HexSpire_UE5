@@ -19,6 +19,7 @@ void FHexIntent::Serialize(FArchive& Ar)
 	}
 	Ar << TargetCells;
 	Ar << TrackedUnitId;
+	Ar << SkillId;
 	Ar << PredictedDamage;
 	Ar << HitCount;
 	Ar << MoveToAnchor;
@@ -26,6 +27,48 @@ void FHexIntent::Serialize(FArchive& Ar)
 	Ar << ResultFacing;
 	Ar << StatusId;
 	Ar << StatusStacks;
+}
+
+// ───────────────────────────────────────────────────────── 技能
+
+int32 FHexUnit::GetSkillCooldown(FName InSkillId) const
+{
+	// ⚠️ 用下标对齐而非 TMap 查找 —— SkillCooldowns 与 SkillIds 是平行数组。
+	//    长度不一致时按未配置处理（返回 0 = 可用），而不是越界。
+	//    宁可"技能提前可用"也不要崩：前者是数值问题，后者让整场战斗中止。
+	for (int32 I = 0; I < SkillIds.Num(); ++I)
+	{
+		if (SkillIds[I] == InSkillId)
+		{
+			return SkillCooldowns.IsValidIndex(I) ? SkillCooldowns[I] : 0;
+		}
+	}
+	return 0;
+}
+
+void FHexUnit::SetSkillCooldown(FName InSkillId, int32 Rounds)
+{
+	for (int32 I = 0; I < SkillIds.Num(); ++I)
+	{
+		if (SkillIds[I] == InSkillId)
+		{
+			// 平行数组可能因为读档/手工构造而短了一截，这里补齐再写
+			if (SkillCooldowns.Num() < SkillIds.Num())
+			{
+				SkillCooldowns.SetNumZeroed(SkillIds.Num());
+			}
+			SkillCooldowns[I] = FMath::Max(0, Rounds);
+			return;
+		}
+	}
+}
+
+void FHexUnit::TickSkillCooldowns()
+{
+	for (int32& CD : SkillCooldowns)
+	{
+		CD = FMath::Max(0, CD - 1);
+	}
 }
 
 // ───────────────────────────────────────────────────────── 几何
@@ -433,6 +476,15 @@ void FHexUnit::Serialize(FArchive& Ar)
 	Ar << bIsAlive;
 	Ar << bIsElite << bIsBoss << BossPhase;
 	Ar << KnockbackResistOverride;
+
+	// ⚠️ 这几项必须进存档：它们是敌人行为的一部分，
+	//    漏掉会让读档后的敌人退回结构体默认值（移动 2 格、射程走 profile），
+	//    与存档前的行为不一致 —— 而回放/复现全靠"状态完全一致"成立。
+	Ar << MoveBudget;
+	Ar << PreferredDistance;
+	Ar << AttackRangeOverride;
+	Ar << SkillIds;
+	Ar << SkillCooldowns;
 
 	Intent.Serialize(Ar);
 

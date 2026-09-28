@@ -172,7 +172,28 @@ enum class EHexTriggerTiming : uint8
 	OnUnitDeath = 20		UMETA(DisplayName = "单位死亡"),
 	OnBattleWin = 21		UMETA(DisplayName = "战斗胜利"),
 
-	Count = 22				UMETA(Hidden),
+	// ── §6.3 时机表补齐（第二批）
+	//
+	// ⚠️ 只能追加，不能插入 —— 枚举值进回放存档。
+	//
+	// ⚠️ 局外链（ON_ROOM_ENTER / ON_ROOM_CLEAR / ON_FLOOR_CLEAR /
+	//    ON_SHARD_ABSORBED / ON_CARD_ACQUIRED / ON_GOLD_GAINED）
+	//    刻意【不在】这张表里：TriggerBus 与符文效果（FHexEffectStep）
+	//    都是战斗作用域 —— "清房时抽一张牌"在没有牌堆的探索阶段
+	//    没有定义。等局外符文效果的语义确定后再扩，
+	//    届时需要一并决定：效果延迟到下场战斗开始结算，
+	//    还是新增一类局外效果操作。不要只加枚举不答这个问题。
+	OnEnergySpent = 22		UMETA(DisplayName = "消耗体力"),
+	/** 超杀：致死一击超出目标剩余生命的部分（§6.3 攻击链） */
+	OnOverkill = 23			UMETA(DisplayName = "超杀"),
+	OnRotate = 24			UMETA(DisplayName = "转向"),
+	OnStatusTick = 25		UMETA(DisplayName = "状态跳伤"),
+	OnStatusExpired = 26	UMETA(DisplayName = "状态到期"),
+	OnTerrainChanged = 27	UMETA(DisplayName = "地形改变"),
+	/** 单位踩进危害地形（不限阵营 —— "推进尖刺"流的组合钩子） */
+	OnEnterHazard = 28		UMETA(DisplayName = "进入危害地形"),
+
+	Count = 29				UMETA(Hidden),
 };
 
 /**
@@ -252,6 +273,39 @@ enum class EHexIntentKind : uint8
 	Rotate = 6		UMETA(DisplayName = "转向"),
 	Special = 7		UMETA(DisplayName = "特殊"),
 	Sleep = 8		UMETA(DisplayName = "休眠"),
+};
+
+// ────────────────────────────────────────────────────────── 表现（动作）
+
+/**
+ * 施法者播放的动作种类。
+ *
+ * ⚠️ 为什么这个枚举放在【逻辑层】而不是表现层：
+ *    "这个技能该播哪种动作"是内容作者的决定，属于内容定义；
+ *    "那种动作是哪个 AnimSequence"才是表现层的事，归 DataAsset。
+ *    §13.2 硬要求玩家能从动作预判意图 —— 近战怪与法术怪都发
+ *    damage_dealt 事件，若表现层一律播 Attack，那条 UX 当场失效。
+ *    而这个区分表现层推不出来，必须由内容显式声明。
+ *
+ * ⚠️ 枚举本身不引用任何资产，所以它留在 core 不破坏
+ *    Core/CoreUObject 的依赖边界（见 HexSpireCore.Build.cs）。
+ *
+ * None 表示"内容没声明" —— 表现层此时按事件类型取一个保守默认，
+ * 而不是不播。留空是灰盒期的常态，不该导致角色僵住。
+ */
+UENUM(BlueprintType)
+enum class EHexUnitAnim : uint8
+{
+	None = 0		UMETA(DisplayName = "未声明"),
+	Idle = 1		UMETA(DisplayName = "待机"),
+	Walk = 2		UMETA(DisplayName = "行走"),
+	Attack = 3		UMETA(DisplayName = "近战攻击"),
+	Cast = 4		UMETA(DisplayName = "施法"),
+	Shoot = 5		UMETA(DisplayName = "射击"),
+	GetHit = 6		UMETA(DisplayName = "受击"),
+	Die = 7			UMETA(DisplayName = "死亡"),
+
+	Count = 8		UMETA(Hidden),
 };
 
 // ────────────────────────────────────────────────────────── 地形（§8.3）

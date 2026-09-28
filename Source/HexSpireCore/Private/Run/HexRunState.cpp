@@ -247,12 +247,11 @@ int32 FHexRunState::RestAtCamp()
 
 // ══════════════════════════════════════════════════════════ 层结算（§9.5）
 
-void FHexRunState::GenerateFloorRewards(
-	FHexRngStreams& Rng, TArray<FHexRewardOption>& Out) const
+void FHexRunState::GetUnownedRuneCandidates(TArray<FName>& Out) const
 {
 	Out.Reset();
 
-	// ── 已持有的符文（含已装备与背包里的），三选一必须排除它们
+	// ── 已持有的符文（含已装备与背包里的），候选必须排除它们
 	TSet<FName> Owned;
 	{
 		TArray<TPair<int32, const FHexRuneData*>> Equipped;
@@ -270,24 +269,25 @@ void FHexRunState::GenerateFloorRewards(
 		}
 	}
 
-	// ── 候选符文池
-	//
-	// ⚠️ 诅咒符文【不进层结算的三选一】。
+	// ⚠️ 诅咒符文【不进三选一】。
 	//    三选一是"必须选一个"的场合，塞进诅咒等于强迫玩家吃亏。
 	//    诅咒符文的正确出口是事件房与高腐蚀度掉落（玩家可以拒绝）。
-	TArray<FName> Candidates;
 	for (const FHexRuneData& R : FHexRuneLibrary::AllRunes())
 	{
-		if (R.bIsCursed)
+		if (!R.bIsCursed && !Owned.Contains(R.Id))
 		{
-			continue;
+			Out.Add(R.Id);
 		}
-		if (Owned.Contains(R.Id))
-		{
-			continue;
-		}
-		Candidates.Add(R.Id);
 	}
+}
+
+void FHexRunState::GenerateFloorRewards(
+	FHexRngStreams& Rng, TArray<FHexRewardOption>& Out) const
+{
+	Out.Reset();
+
+	TArray<FName> Candidates;
+	GetUnownedRuneCandidates(Candidates);
 
 	// ── 抽 3 个（不足则给全部）
 	//
@@ -295,7 +295,39 @@ void FHexRunState::GenerateFloorRewards(
 	//    抽 3 次可能抽到重复，三选一里出现两个相同选项等于只有两个选项。
 	Rng.Shuffle(Candidates, EHexRngStream::Loot);
 
-	const int32 Take = FMath::Min(3, Candidates.Num());
+	int32 Take = FMath::Min(3, Candidates.Num());
+
+	// ── 保底 1 稀有（§6.6：层结算三选一"保底 1 个稀有"）
+	//
+	// ⚠️ 判据是 Rarity >= Rare。若洗出的前 3 全是普通，
+	//    从剩余候选里找第一个稀有+，顶替第 3 个位置。
+	//    用洗牌后的顺序找而不是再掷随机数 —— 同种子同结果（纪律 5）。
+	//    池子里一个稀有都不剩时保底自然失效，不强造。
+	{
+		bool bHasRarePlus = false;
+		for (int32 I = 0; I < Take; ++I)
+		{
+			const FHexRuneData* R = FHexRuneLibrary::FindRune(Candidates[I]);
+			if (R && R->Rarity >= EHexRarity::Rare)
+			{
+				bHasRarePlus = true;
+				break;
+			}
+		}
+		if (!bHasRarePlus)
+		{
+			for (int32 I = Take; I < Candidates.Num(); ++I)
+			{
+				const FHexRuneData* R = FHexRuneLibrary::FindRune(Candidates[I]);
+				if (R && R->Rarity >= EHexRarity::Rare)
+				{
+					Candidates.Swap(Take - 1, I);
+					break;
+				}
+			}
+		}
+	}
+
 	for (int32 I = 0; I < Take; ++I)
 	{
 		const FHexRuneData* R = FHexRuneLibrary::FindRune(Candidates[I]);
@@ -336,6 +368,42 @@ void FHexRunState::GenerateFloorRewards(
 		Opt.DisplayName = TEXT("碎片");
 		Opt.Description = FString::Printf(
 			TEXT("获得 %d 枚碎片（可用于重塑装备词条）"), Opt.Amount);
+		Out.Add(Opt);
+	}
+}
+
+void FHexRunState::GenerateRuneChoice(
+	FHexRngStreams& Rng, TArray<FHexRewardOption>& Out) const
+{
+	Out.Reset();
+
+	TArray<FName> Candidates;
+	GetUnownedRuneCandidates(Candidates);
+
+	if (Candidates.Num() == 0)
+	{
+		// 全部持有 —— 视为无掉落，不硬塞重复项
+		return;
+	}
+
+	// 洗牌取前 3（同层结算的理由：抽 3 次会出重复项）。
+	// ⚠️ 刻意【无】保底稀有 —— 保底是层 Boss 的特权（§6.6）。
+	Rng.Shuffle(Candidates, EHexRngStream::Loot);
+
+	const int32 Take = FMath::Min(3, Candidates.Num());
+	for (int32 I = 0; I < Take; ++I)
+	{
+		const FHexRuneData* R = FHexRuneLibrary::FindRune(Candidates[I]);
+		if (!R)
+		{
+			continue;
+		}
+		FHexRewardOption Opt;
+		Opt.Kind = FHexRewardOption::EKind::Rune;
+		Opt.ContentId = R->Id;
+		Opt.DisplayName = R->DisplayName;
+		// 三选一是推理决策点，玩家要看的是"它做什么"（R8）
+		Opt.Description = R->MechanicText;
 		Out.Add(Opt);
 	}
 }

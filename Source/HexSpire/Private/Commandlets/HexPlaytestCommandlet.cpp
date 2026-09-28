@@ -476,11 +476,16 @@ namespace
 
 		S.RebuildOccupancy();
 
-		// ── 卡组（含装备注入）
+		// ── 卡组（含装备与符文注入）
 		{
 			TArray<FHexCardInstance> Deck = Run.Deck;
 			TArray<FName> Injected;
 			Run.EquipLoadout.GetInjectedCardIds(Injected);
+			{
+				TArray<FName> FromRunes;
+				Run.RuneLoadout.GetInjectedCardIds(FromRunes);
+				Injected.Append(FromRunes);
+			}
 			int32 Uid = 900000;
 			for (const FName& Cid : Injected)
 			{
@@ -535,6 +540,11 @@ namespace
 
 			TArray<FName> Injected;
 			Run.EquipLoadout.GetInjectedCardIds(Injected);
+			{
+				TArray<FName> FromRunes;
+				Run.RuneLoadout.GetInjectedCardIds(FromRunes);
+				Injected.Append(FromRunes);
+			}
 			Run.Deck.Reset();
 			for (const FHexCardInstance& C : Full)
 			{

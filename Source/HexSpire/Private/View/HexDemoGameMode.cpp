@@ -1,18 +1,25 @@
 // Copyright Hex Spire. All Rights Reserved.
 
 #include "View/HexDemoGameMode.h"
+#include "View/HexVisualQueue.h"
+#include "Fx/HexFxRuntime.h"
+#include "Fx/HexFxLibraryAsset.h"
 #include "View/HexBoardVisual.h"
 #include "View/HexUnitVisual.h"
 #include "View/HexDemoPlayerController.h"
 #include "View/HexDemoHUD.h"
 #include "Data/HexCardTableLoader.h"
+#include "Data/HexUnitTableLoader.h"
+#include "Data/HexRuneTableLoader.h"
 
 #include "Run/HexRunState.h"
 #include "Battle/HexBattleState.h"
+#include "Battle/HexBattleEventNames.h"
 #include "Battle/HexBattleFlow.h"
 #include "Battle/HexEnemyAI.h"
 #include "Battle/HexUnit.h"
 #include "Content/HexContentLibrary.h"
+#include "Runes/HexRuneLibrary.h"
 #include "Content/HexLayouts.h"
 #include "Map/HexFloorMap.h"
 #include "Hex/HexCoord.h"
@@ -53,6 +60,21 @@ void AHexDemoGameMode::StartPlay()
 	//    见 FHexCardTableLoader 的说明。
 	FHexCardTableLoader::ApplyDefaultTable();
 
+	// ── 英雄/敌人配表与外观资产：同样必须在 StartNewRun【之前】
+	//
+	// ⚠️ 顺序与卡表同理，但踩坑方式更直接：StartNewRun 会按英雄定义
+	//    把六属性拷进 RunState，之后再覆写只改到库里那份 ——
+	//    本局纹丝不动，重开一局才对。
+	//
+	// ⚠️ 也必须在任何 FindEnemy 之前：OverrideEnemy 会让 TArray 重分配，
+	//    已持有的 FHexEnemyData* 全部失效（BeginBattleForRoom 持有它们）。
+	FHexUnitTableLoader::ApplyDefaults();
+
+	// ── 符文配表：时机约束比单位表更硬 ——
+	//    RuneLoadout 持有指进符文库数组的裸指针，覆写会让数组搬家。
+	//    必须在任何 RunState 建立之前应用（见 OverrideRune 的注释）。
+	FHexRuneTableLoader::ApplyDefaults();
+
 	// ── 棋盘：优先复用关卡里已放置的那一个
 	//
 	// ⚠️ 这条"先找再建"很重要：
@@ -79,6 +101,25 @@ void AHexDemoGameMode::StartPlay()
 	}
 
 	SetupCamera();
+
+	// ── 特效库与回放队列
+	//
+	// ⚠️ 必须在 StartNewRun 之前 —— StartNewRun 会一路走到
+	//    BeginBattle 并产出第一批事件（战斗开始、抽牌、意图生成）。
+	//    队列晚于它建立的话，那批事件会在 Tick 里被当成"无人接收"丢掉，
+	//    表现为"第一回合没有任何特效，第二回合才正常"。
+	FxRuntime = MakeUnique<FHexFxRuntime>();
+	if (FxRuntime->LoadDefaultLibrary())
+	{
+		// 存一份 UPROPERTY 强引用防 GC。
+		// 少了这一句的症状很隐蔽：GC 通常不会立刻跑，
+		// 于是前几回合特效正常，某次 GC 之后突然全没了。
+		FxLibraryKeepAlive = FxRuntime->GetLibrary();
+		FxRuntime->Preload();
+	}
+
+	VisualQueue = MakeUnique<FHexVisualQueue>();
+	VisualQueue->Init(Board, FxRuntime.Get(), &UnitVisuals);
 
 	// 用时间做种子，每次启动都是新局
 	StartNewRun(0);
@@ -127,6 +168,179 @@ void AHexDemoGameMode::StartPlay()
 		else
 		{
 			UE_LOG(LogHexSpire, Error, TEXT("[自检] 没有可进入的房间"));
+		}
+	}
+
+	// ── 自检开关：-HexAutoPlayCard
+	//
+	// ⚠️ 存在的理由与 -HexAutoRoom 同一条，但针对的是【回放链路】：
+	//    VfxId / SfxId / CastAnim 只在【打出卡牌】时才产生，
+	//    而 -HexAutoRoom 只进房不出牌。也就是说进房自检全绿时，
+	//    整条 step → action → event → 队列 → 特效 的链路
+	//    一次都没被执行过。
+	//
+	//    这条链路的失败模式全是静默的：
+	//      · 盖章作用域没生效 → 事件里 VfxId 为空，不报错，只是没特效
+	//      · 队列没建起来     → 事件被 Drain 后丢掉，不报错
+	//      · 库路径写错       → 全程不播，只有一条 Display 日志
+	//    三种都不会让游戏崩，所以必须把【实际数字】打进日志才能验证。
+	if (FParse::Param(FCommandLine::Get(), TEXT("HexAutoPlayCard")))
+	{
+		const FHexBattleState* BS = GetBattleState();
+		if (!BS || !bInBattle)
+		{
+			UE_LOG(LogHexSpire, Error,
+				TEXT("[自检] 不在战斗中 —— 本开关需要与 -HexAutoRoom 同时使用"));
+		}
+		else
+		{
+			// ── 优先挑一张【配了表现 id】且当前可打的卡
+			//
+			// ⚠️ 这个偏好是必须的，不是为了让日志好看：
+			//    卡池里只有基石卡配了 VfxId（其余还没配），
+			//    随机挑到未配置的卡时自检会打出 "vfx=0"，
+			//    与"盖章失效"的输出【完全一样】——
+			//    于是这条自检时绿时红，失去判据作用。
+			//    固定卡（基石）常驻可用且已配表现 id，是稳定的验证对象。
+			//
+			// ⚠️ 也不能只看"可打"：手牌里可能是费用不够或没有合法目标的卡，
+			//    那样 PlayCard 会返回失败，自检看起来"跑了"但其实没出牌。
+			int32 PickedUid = 0;
+
+			auto HasVisualIds = [this](FName CardId) -> bool
+			{
+				const FHexCardData* Def = FHexContentLibrary::FindCard(CardId);
+				if (!Def)
+				{
+					return false;
+				}
+				for (const FHexEffectStep& S : Def->Effects)
+				{
+					if (!S.VfxId.IsNone() || !S.SfxId.IsNone())
+					{
+						return true;
+					}
+				}
+				return Def->CastAnim != EHexUnitAnim::None;
+			};
+
+			// 第一轮：配了表现 id 的（固定卡优先 —— 基石卡必然可打）
+			for (const FHexCardInstance& C : BS->FixedCards)
+			{
+				if (BattleFlow->CanPlayCard(C.Uid) && HasVisualIds(C.CardId))
+				{
+					PickedUid = C.Uid;
+					break;
+				}
+			}
+			if (PickedUid == 0)
+			{
+				for (const FHexCardInstance& C : BS->Piles.GetHand())
+				{
+					if (BattleFlow->CanPlayCard(C.Uid) && HasVisualIds(C.CardId))
+					{
+						PickedUid = C.Uid;
+						break;
+					}
+				}
+			}
+
+			// 第二轮：退而求其次，任何可打的卡（此时 vfx=0 是正常的，
+			// 说明卡池里没有配了表现 id 的可打卡 —— 日志会说明）
+			if (PickedUid == 0)
+			{
+				for (const FHexCardInstance& C : BS->Piles.GetHand())
+				{
+					if (BattleFlow->CanPlayCard(C.Uid)) { PickedUid = C.Uid; break; }
+				}
+			}
+			if (PickedUid == 0)
+			{
+				for (const FHexCardInstance& C : BS->FixedCards)
+				{
+					if (BattleFlow->CanPlayCard(C.Uid)) { PickedUid = C.Uid; break; }
+				}
+			}
+
+			if (PickedUid == 0)
+			{
+				UE_LOG(LogHexSpire, Error, TEXT("[自检] 没有任何可打出的卡"));
+			}
+			else
+			{
+				TArray<FIntVector> Targets;
+				BattleFlow->GetLegalTargets(PickedUid, Targets);
+				const FIntVector Cell =
+					Targets.Num() > 0 ? Targets[0] : FIntVector::ZeroValue;
+
+				// ⚠️ 必须在【出牌之前】记下 CardId：
+				//    出牌后这张卡就离开手牌了（进弃牌堆或消耗区），
+				//    再按 uid 去手牌里找必然找不到 —— 第一版就是这么
+				//    让"卡定义"那段诊断日志整段消失的。
+				FName PlayedCardId;
+				for (const FHexCardInstance& C : BS->Piles.GetHand())
+				{
+					if (C.Uid == PickedUid) { PlayedCardId = C.CardId; break; }
+				}
+				if (PlayedCardId.IsNone())
+				{
+					for (const FHexCardInstance& C : BS->FixedCards)
+					{
+						if (C.Uid == PickedUid) { PlayedCardId = C.CardId; break; }
+					}
+				}
+
+				const int32 EventsBefore = BS->NumPendingEvents();
+				const EHexPlayResult R = BattleFlow->PlayCard(PickedUid, Cell);
+
+				UE_LOG(LogHexSpire, Display,
+					TEXT("[自检] 出牌 uid=%d 结果=%d 新事件=%d"),
+					PickedUid, static_cast<int32>(R),
+					BS->NumPendingEvents() - EventsBefore);
+
+				// 关键断言数据：事件里到底带没带表现 id。
+				// 这三个计数是"盖章有没有生效"的唯一客观证据。
+				int32 WithVfx = 0, WithSfx = 0, WithAnim = 0;
+				for (const FHexBattleEvent& E :
+					BS->GetPendingEventsFrom(EventsBefore))
+				{
+					if (!E.VfxId.IsNone())  { ++WithVfx; }
+					if (!E.SfxId.IsNone())  { ++WithSfx; }
+					if (E.CastAnim != EHexUnitAnim::None) { ++WithAnim; }
+
+					UE_LOG(LogHexSpire, Display,
+						TEXT("[自检]   事件 %s vfx=%s sfx=%s anim=%d"),
+						*E.Type.ToString(), *E.VfxId.ToString(),
+						*E.SfxId.ToString(), static_cast<int32>(E.CastAnim));
+				}
+
+				UE_LOG(LogHexSpire, Display,
+					TEXT("[自检] 带表现 id 的事件：vfx=%d sfx=%d anim=%d"),
+					WithVfx, WithSfx, WithAnim);
+
+				// 分段定位：卡定义 → 动作 → 事件，三段各报一次。
+				// 只看最终事件的话，"数据没配"与"盖章失效"无法区分。
+				if (const FHexCardData* Def = FHexContentLibrary::FindCard(PlayedCardId))
+				{
+					UE_LOG(LogHexSpire, Display,
+						TEXT("[自检] 卡定义 %s：CastAnim=%d steps=%d"),
+						*Def->Id.ToString(), static_cast<int32>(Def->CastAnim),
+						Def->Effects.Num());
+					for (int32 I = 0; I < Def->Effects.Num(); ++I)
+					{
+						UE_LOG(LogHexSpire, Display,
+							TEXT("[自检]   step[%d] op=%d vfx=%s sfx=%s"),
+							I, static_cast<int32>(Def->Effects[I].Op),
+							*Def->Effects[I].VfxId.ToString(),
+							*Def->Effects[I].SfxId.ToString());
+					}
+				}
+
+				UE_LOG(LogHexSpire, Display,
+					TEXT("[自检] 特效库=%s 回放队列=%s"),
+					FxRuntime && FxRuntime->IsLoaded() ? TEXT("已加载") : TEXT("未加载"),
+					VisualQueue ? TEXT("已建立") : TEXT("未建立"));
+			}
 		}
 	}
 
@@ -241,6 +455,43 @@ void AHexDemoGameMode::StartNewRun(uint64 Seed)
 	Rng = MakeUnique<FHexRngStreams>(MasterSeed);
 	RunState = MakeUnique<FHexRunState>(MasterSeed);
 	RunState->BeginRun(TEXT("warden"), *Rng);
+
+	// ── 演示用开局符文
+	//
+	// 策划案 §3.1 的节奏是"第 1 层：基石卡 + 1 武器 + 1 符文"。
+	// 这里先给 3 个，让符文面板和 §6.5 的顺序机制开局即可见可玩；
+	// 获取节奏定稿后收敛回 1 个。
+	//
+	// ⚠️ 刻意选《砺石》+《倍影》——策划案 §6.5 的原示例：
+	//    交换这两个槽位，攻击伤害立刻可观测地变化（加区在乘区前更高），
+	//    这是"顺序有意义"最直接的教学。《轮回护符》挂 OnDeckReshuffled，
+	//    小卡组下每 2-4 回合触发一次，验证触发链活着。
+	{
+		const TCHAR* StarterRunes[] = {
+			TEXT("rune_whetstone"),
+			TEXT("rune_twin_shadow"),
+			TEXT("rune_cycle_ward"),
+		};
+		for (const TCHAR* Id : StarterRunes)
+		{
+			if (const FHexRuneData* R = FHexRuneLibrary::FindRune(Id))
+			{
+				const int32 SlotIdx = RunState->RuneLoadout.FindFirstEmptySlot();
+				if (SlotIdx != INDEX_NONE)
+				{
+					RunState->RuneLoadout.SetSlot(SlotIdx, R);
+				}
+			}
+			else
+			{
+				// 符文改 id 时这里必须吼一声，否则开局符文静默消失
+				UE_LOG(LogHexSpire, Warning,
+					TEXT("开局符文 %s 在符文库里不存在（改名了？）"), Id);
+			}
+		}
+		UE_LOG(LogHexSpire, Display, TEXT("开局符文已装：%d/6"),
+			RunState->RuneLoadout.GetFilledCount());
+	}
 
 	BattleState.Reset();
 	BattleFlow.Reset();
@@ -390,6 +641,43 @@ void AHexDemoGameMode::RestAtCamp()
 		Healed, RunState->HeroHP, RunState->HeroHPMax);
 }
 
+float AHexDemoGameMode::GetRuneFlashStrength(int32 SlotIndex) const
+{
+	if (SlotIndex < 0 || SlotIndex >= FHexRuneLoadout::SlotCount
+		|| RuneFlashTime[SlotIndex] <= 0.0f || !GetWorld())
+	{
+		return 0.0f;
+	}
+
+	// 0.8 秒线性衰减：足够被余光捕捉，又不会在连锁触发时闪成频闪灯
+	constexpr float FlashDuration = 0.8f;
+	const float Elapsed = GetWorld()->GetTimeSeconds() - RuneFlashTime[SlotIndex];
+	return FMath::Clamp(1.0f - Elapsed / FlashDuration, 0.0f, 1.0f);
+}
+
+bool AHexDemoGameMode::RequestRuneReorder(int32 SlotA, int32 SlotB)
+{
+	if (!RunState)
+	{
+		return false;
+	}
+
+	const bool bOk = RunState->ReorderRune(SlotA, SlotB);
+
+	if (!bOk && RunState->bRuneLayoutLocked)
+	{
+		// §6.5：战斗中锁定。给玩家一句解释，而不是按钮无声失灵。
+		StatusMessage = TEXT("战斗中不能重排符文（战斗外自由调整）");
+	}
+	else if (bOk && SlotA != SlotB)
+	{
+		StatusMessage = FString::Printf(
+			TEXT("符文槽 %d ↔ %d 已交换（结算顺序随之改变）"), SlotA + 1, SlotB + 1);
+	}
+
+	return bOk;
+}
+
 // ══════════════════════════════════════════════════════════ 战斗
 
 void AHexDemoGameMode::BeginBattleForRoom(int32 RoomId)
@@ -516,12 +804,18 @@ void AHexDemoGameMode::BeginBattleForRoom(int32 RoomId)
 
 	BattleState->RebuildOccupancy();
 
-	// ── 卡组（含装备注入的衍生卡）
+	// ── 卡组（含装备与符文注入的衍生卡）
 	{
 		TArray<FHexCardInstance> Deck = RunState->Deck;
 
 		TArray<FName> Injected;
 		RunState->EquipLoadout.GetInjectedCardIds(Injected);
+		{
+			// 符文的衍生卡与装备同一套注入语义（§6 InjectedCardIds）
+			TArray<FName> FromRunes;
+			RunState->RuneLoadout.GetInjectedCardIds(FromRunes);
+			Injected.Append(FromRunes);
+		}
 		for (const FName& Cid : Injected)
 		{
 			FHexCardInstance Inst;
@@ -614,6 +908,9 @@ bool AHexDemoGameMode::PlayCard(int32 CardUid, const FIntVector& TargetCell)
 		{
 			PlayHeroCardAnim(PlayedType);
 		}
+		// ⚠️ 打牌是最常见的"最后一击"入口 —— 杀掉最后一个敌人后
+		//    必须立刻宣告，不能等玩家按空格结束回合才发现赢了。
+		AnnounceBattleOutcomeIfOver();
 		return true;
 
 	case EHexPlayResult::NotEnoughEnergy:
@@ -649,16 +946,27 @@ void AHexDemoGameMode::EndTurn()
 	BattleFlow->EndPlayerTurn();
 	RefreshVisuals();
 
-	if (BattleFlow->IsBattleOver())
+	AnnounceBattleOutcomeIfOver();
+}
+
+void AHexDemoGameMode::AnnounceBattleOutcomeIfOver()
+{
+	if (!bInBattle || !BattleFlow || !BattleState || !BattleFlow->IsBattleOver())
 	{
-		if (BattleState->Phase == EHexBattlePhase::BattleLose)
-		{
-			StatusMessage = TEXT("你死了。按 R 重开一局。");
-		}
-		else
-		{
-			StatusMessage = TEXT("战斗胜利！按 Enter 结算并回到地图。");
-		}
+		return;
+	}
+
+	if (BattleState->Phase == EHexBattlePhase::BattleLose)
+	{
+		StatusMessage = TEXT("你死了。按 R 重开一局。");
+	}
+	else if (CurrentRoomType == EHexRoomType::Boss)
+	{
+		StatusMessage = TEXT("★ BOSS 已倒下！按 Enter 进入层结算。");
+	}
+	else
+	{
+		StatusMessage = TEXT("战斗胜利！按 Enter 结算并回到地图。");
 	}
 }
 
@@ -691,9 +999,14 @@ void AHexDemoGameMode::FinishBattleAndReturnToMap()
 		TArray<FHexCardInstance> Full;
 		BattleState->Piles.EndBattle(Full);
 
-		// 剔除装备注入的衍生卡：它们随装备来，不属于卡组
+		// 剔除装备/符文注入的衍生卡：它们随来源来，不属于卡组
 		TArray<FName> Injected;
 		RunState->EquipLoadout.GetInjectedCardIds(Injected);
+		{
+			TArray<FName> FromRunes;
+			RunState->RuneLoadout.GetInjectedCardIds(FromRunes);
+			Injected.Append(FromRunes);
+		}
 
 		RunState->Deck.Reset();
 		for (const FHexCardInstance& C : Full)
@@ -720,6 +1033,18 @@ void AHexDemoGameMode::FinishBattleAndReturnToMap()
 		{
 			RunState->GenerateFloorRewards(*Rng, PendingRewards);
 			bAwaitingRewardChoice = PendingRewards.Num() > 0;
+			bAdvanceFloorAfterRewards = true;
+		}
+		// ── 非 Boss 房的符文掉落（§10.1：符文以三选一形式拾取）
+		//
+		// 精英必掉（风险回报，§2.1），普通战斗房按概率掉。
+		// 概率走 Loot 流 —— 用战斗流会让"打法影响掉落"，回放失效。
+		else if (CurrentRoomType == EHexRoomType::Elite
+			|| (CurrentRoomType == EHexRoomType::Combat
+				&& Rng->Chance(EHexRngStream::Loot, HexK::CombatRoomRuneChance)))
+		{
+			RunState->GenerateRuneChoice(*Rng, PendingRewards);
+			bAwaitingRewardChoice = PendingRewards.Num() > 0;
 		}
 	}
 
@@ -739,15 +1064,26 @@ void AHexDemoGameMode::FinishBattleAndReturnToMap()
 
 	if (bAwaitingRewardChoice)
 	{
-		StatusMessage = FString::Printf(
-			TEXT("★ BOSS 已倒下！层结算 —— 按数字键选择一项奖励（共 %d 项），按 0 全部放弃"),
-			PendingRewards.Num());
+		StatusMessage = bAdvanceFloorAfterRewards
+			? FString::Printf(
+				TEXT("★ BOSS 已倒下！层结算 —— 按数字键选择一项奖励（共 %d 项），按 0 全部放弃"),
+				PendingRewards.Num())
+			: FString::Printf(
+				TEXT("◆ 发现符文！按数字键三选一（共 %d 项），按 0 放弃"),
+				PendingRewards.Num());
 	}
 	else
 	{
 		StatusMessage = FString::Printf(
 			TEXT("清空！腐蚀度 +%d（现 %d）· 生命 %d/%d —— 选择下一间房"),
 			Delta, RunState->Corruption, RunState->HeroHP, RunState->HeroHPMax);
+	}
+
+	// 兜底：Boss 已倒但没生成出任何奖励（理论上不会发生 ——
+	// 层结算恒有容量与碎片两项）→ 不能卡住，直接进下一层。
+	if (bAdvanceFloorAfterRewards && !bAwaitingRewardChoice)
+	{
+		AdvanceToNextFloor();
 	}
 }
 
@@ -775,6 +1111,10 @@ void AHexDemoGameMode::ChooseReward(int32 Index)
 	if (!bOk)
 	{
 		StatusMessage = TEXT("那项奖励无法应用（可能卡组已满）—— 已跳过");
+		if (bAdvanceFloorAfterRewards)
+		{
+			AdvanceToNextFloor();
+		}
 		return;
 	}
 
@@ -795,6 +1135,12 @@ void AHexDemoGameMode::ChooseReward(int32 Index)
 	{
 		StatusMessage = FString::Printf(TEXT("已获得：%s"), *Chosen.DisplayName);
 	}
+
+	// 层结算处理完毕 → 推进层数（Boss 已倒时）
+	if (bAdvanceFloorAfterRewards)
+	{
+		AdvanceToNextFloor();
+	}
 }
 
 void AHexDemoGameMode::DeclineRewards()
@@ -805,7 +1151,101 @@ void AHexDemoGameMode::DeclineRewards()
 	}
 	PendingRewards.Reset();
 	bAwaitingRewardChoice = false;
-	StatusMessage = TEXT("已放弃本层奖励 —— 选择下一间房");
+	StatusMessage = TEXT("已放弃本层奖励");
+
+	if (bAdvanceFloorAfterRewards)
+	{
+		AdvanceToNextFloor();
+	}
+}
+
+void AHexDemoGameMode::AdvanceToNextFloor()
+{
+	bAdvanceFloorAfterRewards = false;
+
+	if (!RunState || !Rng)
+	{
+		return;
+	}
+
+	const int32 Next = RunState->FloorIndex + 1;
+
+	// ⚠️ BeginFloor 重新生成地图并重置层统计；
+	//    腐蚀度与生命【刻意不动】—— 加压曲线跨层继承（§9.4），
+	//    残血进下一层正是"要不要在营地休整"决策存在的理由。
+	RunState->BeginFloor(Next, *Rng);
+
+	// 每层 ≡ +CorruptionPerDifficultyTier 点等效腐蚀度（见 MakeEnemyUnit），
+	// 提示用真实公式换算，不另编数字。
+	const int32 TierUp = (Next - 1) * HexK::CorruptionPerDifficultyTier;
+	StatusMessage += FString::Printf(
+		TEXT(" ▶ 已进入第 %d 层（层加成：敌人 HP +%d%% ATK +%d%%）—— 选择第一间房"),
+		Next,
+		FMath::RoundToInt(TierUp * HexK::CorruptionEnemyHpStep * 100.0f),
+		FMath::RoundToInt(TierUp * HexK::CorruptionEnemyAtkStep * 100.0f));
+
+	UE_LOG(LogHexSpire, Display,
+		TEXT("进入第 %d 层：腐蚀度 %d，生命 %d/%d，符文 %d/6"),
+		Next, RunState->Corruption, RunState->HeroHP, RunState->HeroHPMax,
+		RunState->RuneLoadout.GetFilledCount());
+}
+
+bool AHexDemoGameMode::DebugGrantRune(const FString& RuneIdStr)
+{
+	if (!RunState || !Rng)
+	{
+		return false;
+	}
+
+	FName Id = RuneIdStr.IsEmpty() ? NAME_None : FName(*RuneIdStr);
+
+	// 空参数 = 自动挑第一个未持有的非诅咒符文
+	if (Id.IsNone())
+	{
+		TSet<FName> Owned;
+		{
+			TArray<TPair<int32, const FHexRuneData*>> Equipped;
+			RunState->RuneLoadout.GetRunesInOrder(Equipped);
+			for (const TPair<int32, const FHexRuneData*>& P : Equipped)
+			{
+				if (P.Value)
+				{
+					Owned.Add(P.Value->Id);
+				}
+			}
+			for (const FName& N : RunState->RuneInventory)
+			{
+				Owned.Add(N);
+			}
+		}
+		for (const FHexRuneData& R : FHexRuneLibrary::AllRunes())
+		{
+			if (!R.bIsCursed && !Owned.Contains(R.Id))
+			{
+				Id = R.Id;
+				break;
+			}
+		}
+	}
+
+	const FHexRuneData* Rune = FHexRuneLibrary::FindRune(Id);
+	if (!Rune)
+	{
+		StatusMessage = FString::Printf(
+			TEXT("[调试] 没有叫 %s 的符文（或全部已持有）"), *Id.ToString());
+		return false;
+	}
+
+	FHexRewardOption Opt;
+	Opt.Kind = FHexRewardOption::EKind::Rune;
+	Opt.ContentId = Rune->Id;
+	Opt.DisplayName = Rune->DisplayName;
+
+	const bool bOk = RunState->ApplyReward(Opt, *Rng);
+	StatusMessage = bOk
+		? FString::Printf(TEXT("[调试] 已获得符文《%s》"), *Rune->DisplayName)
+		: FString::Printf(TEXT("[调试] 符文《%s》发放失败"), *Rune->DisplayName);
+	return bOk;
 }
 
 // ══════════════════════════════════════════════════════════ 选择与高亮
@@ -1037,9 +1477,36 @@ void AHexDemoGameMode::Tick(float DeltaSeconds)
 			}
 		}
 
-		// 事件日志：目前只清空（灰盒期不播动画）。
-		// 接入动画时在这里 Drain 并逐条播放。
+		// ── 事件回放
+		//
+		// ⚠️ 每帧都要 Drain，即使队列没建起来 ——
+		//    不 Drain 的话 EventLog 会无限增长（逻辑层只追加，
+		//    指望表现层取走），一场长战斗后内存会明显上涨，
+		//    而且这种泄漏不会报错。
 		TArray<FHexBattleEvent> Events;
 		BattleState->DrainEvents(Events);
+
+		// ── 符文触发 → 记闪烁时间戳（IntB = TriggerBus 的 SlotOrder，
+		//    1..6 是符文槽；0 是英雄被动、10+ 是装备，不闪卡）
+		//
+		// ⚠️ 在 Drain 处记而不是等 VisualQueue 回放到 —— 闪烁是
+		//    "哪个符文干的"的归因反馈，晚半秒归因就断了。
+		for (const FHexBattleEvent& E : Events)
+		{
+			if (E.Type == HexEv::RuneTriggered
+				&& E.IntB >= 1 && E.IntB <= FHexRuneLoadout::SlotCount)
+			{
+				RuneFlashTime[E.IntB - 1] = GetWorld()->GetTimeSeconds();
+			}
+		}
+
+		if (VisualQueue)
+		{
+			if (Events.Num() > 0)
+			{
+				VisualQueue->Enqueue(Events);
+			}
+			VisualQueue->Tick(DeltaSeconds);
+		}
 	}
 }

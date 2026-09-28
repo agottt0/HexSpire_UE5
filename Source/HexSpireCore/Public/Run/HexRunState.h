@@ -220,6 +220,19 @@ public:
 	 */
 	void GenerateFloorRewards(FHexRngStreams& Rng, TArray<FHexRewardOption>& Out) const;
 
+	/**
+	 * 战斗后的符文三选一（§10.1：符文以三选一形式拾取）。
+	 *
+	 * 与层结算的区别（刻意）：
+	 *   · 只出符文，没有容量/碎片选项
+	 *   · 【无】保底稀有 —— 保底是层 Boss 的特权（§6.6），
+	 *     房间掉落也保底会让 Boss 奖励失去独特性
+	 *   · 候选池同样排除已持有与诅咒符文
+	 *
+	 * 池子空了（全部持有）Out 为空，调用方视为无掉落。
+	 */
+	void GenerateRuneChoice(FHexRngStreams& Rng, TArray<FHexRewardOption>& Out) const;
+
 	/** 应用一个奖励选项 */
 	bool ApplyReward(const FHexRewardOption& Option, FHexRngStreams& Rng);
 
@@ -271,6 +284,9 @@ public:
 	uint64 GetMasterSeed() const { return MasterSeed; }
 
 private:
+	/** 未持有的非诅咒符文候选（GenerateFloorRewards 与 GenerateRuneChoice 共用） */
+	void GetUnownedRuneCandidates(TArray<FName>& Out) const;
+
 	/** 卡实例 uid 分配器（0 保留为无效） */
 	int32 NextCardUid = 1;
 

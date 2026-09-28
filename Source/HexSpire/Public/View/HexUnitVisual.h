@@ -19,6 +19,7 @@ class UStaticMeshComponent;
 class USkeletalMeshComponent;
 class UMaterialInstanceDynamic;
 class UAnimSequence;
+class UHexUnitVisualSet;
 class FHexUnit;
 class AHexBoardVisual;
 
@@ -67,6 +68,13 @@ private:
 
 	/** 队伍 → 基础颜色 */
 	static FLinearColor ColorForTeam(EHexTeam Team, bool bIsElite, bool bIsBoss);
+
+	/**
+	 * 战术朝向 + 美术朝向修正（VisualSet 的 MeshRotation）合成。
+	 * 所有给 BodySkel 设置朝向的地方必须走这里，
+	 * 否则朝向插值会把美术修正冲掉 —— 症状是"模型转身后又歪回去"。
+	 */
+	FRotator ComposeFacing(float Yaw) const;
 
 	UPROPERTY()
 	USceneComponent* Root = nullptr;
@@ -140,6 +148,16 @@ private:
 	/** 指向静态外观表，不持有所有权 */
 	const FHexUnitAppearance* Look = nullptr;
 
+	/**
+	 * 单位专属外观资产（DA_UnitVisual_<SourceId>），可空。
+	 *
+	 * ⚠️ 裸指针但对 GC 安全：FHexUnitTableLoader 用 TStrongObjectPtr
+	 *    持有全部 VisualSet，生命周期覆盖整场战斗。
+	 *    这里不加 UPROPERTY 是因为 const UObject 指针进 UPROPERTY
+	 *    要绕弯 —— 依赖 loader 的强引用即可，与 Look 同一模式。
+	 */
+	const UHexUnitVisualSet* VisualSet = nullptr;
+
 	FTimerHandle AnimResetTimer;
 
 	int32 UnitId = -1;
@@ -158,6 +176,13 @@ private:
 	/** 朝向插值目标（Yaw，度） */
 	float TargetYaw = 0.0f;
 	bool bHasTargetYaw = false;
+
+	/**
+	 * 朝向插值的当前值。
+	 * ⚠️ 不能从组件读回：组件旋转合成过 MeshRotation（见 ComposeFacing），
+	 *    读回的 Yaw 不是纯朝向角。
+	 */
+	float SmoothedYaw = 0.0f;
 
 	EHexUnitAnim CurrentAnim = EHexUnitAnim::Idle;
 

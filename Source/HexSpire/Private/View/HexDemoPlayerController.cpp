@@ -314,3 +314,11 @@ void AHexDemoPlayerController::OnNumberKey(int32 Index)
 		Mode->EnterRoom(Choices[Index].RoomId);
 	}
 }
+
+void AHexDemoPlayerController::HexRune(const FString& RuneId)
+{
+	if (AHexDemoGameMode* Mode = GetDemoMode())
+	{
+		Mode->DebugGrantRune(RuneId);
+	}
+}

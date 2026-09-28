@@ -22,6 +22,7 @@
 //      那是未完成状态，会让基石卡吃掉卡组容量（违反 §7.6）。
 
 #include "Content/HexContentLibrary.h"
+#include "Content/HexEnemySkillLibrary.h"
 #include "Battle/HexUnit.h"
 #include "Deck/HexPileManager.h"
 #include "Runes/HexRuneLibrary.h"
@@ -89,12 +90,55 @@ namespace
 	}
 }
 
+namespace
+{
+	TArray<FHexHeroData> BuildAllHeroes()
+	{
+		return { MakeWarden() };
+	}
+
+	/**
+	 * 可变英雄表 —— 支持表现层的 DataTable 覆写（OverrideHero）。
+	 *
+	 * 函数内静态：首次调用时构造一次，之后零开销。
+	 * 验证器与批量模拟会调用几十万次，不能每次重建。
+	 *
+	 * ⚠️ 与 MutableCards 同样的指针失效风险：覆写时 TArray 可能重分配，
+	 *    已持有的 FHexHeroData* 全部失效。RunState 在开局时拷贝英雄数值，
+	 *    所以覆写必须早于 StartNewRun。
+	 */
+	TArray<FHexHeroData>& MutableHeroes()
+	{
+		static TArray<FHexHeroData> Heroes = BuildAllHeroes();
+		return Heroes;
+	}
+}
+
 const TArray<FHexHeroData>& FHexContentLibrary::AllHeroes()
 {
-	// 函数内静态：首次调用时构造一次，之后零开销。
-	// 验证器与批量模拟会调用几十万次，不能每次重建。
-	static const TArray<FHexHeroData> Heroes = { MakeWarden() };
-	return Heroes;
+	return MutableHeroes();
+}
+
+bool FHexContentLibrary::OverrideHero(const FHexHeroData& Hero)
+{
+	TArray<FHexHeroData>& Heroes = MutableHeroes();
+
+	for (FHexHeroData& H : Heroes)
+	{
+		if (H.Id == Hero.Id)
+		{
+			H = Hero;
+			return true;
+		}
+	}
+
+	Heroes.Add(Hero);
+	return false;
+}
+
+void FHexContentLibrary::ResetHeroOverrides()
+{
+	MutableHeroes() = BuildAllHeroes();
 }
 
 const FHexHeroData* FHexContentLibrary::FindHero(FName Id)
@@ -160,6 +204,26 @@ namespace
 		TArray<FHexCardData> Out;
 		Out.Reserve(12);
 
+		// ───────────────────────── 表现 id 的命名约定
+		//
+		// ⚠️ 为什么内建卡必须带上 VfxId / SfxId / CastAnim，
+		//    哪怕特效库还没建：
+		//    这几个 id 是【管线是否接通】的唯一可验证证据。
+		//    全部留空的话，"事件里没有表现 id" 就有两种解释 ——
+		//    数据没配 vs 盖章失效 —— 而后者是真缺陷。
+		//    有了这几条，-HexAutoPlayCard 自检打出的
+		//    "带表现 id 的事件：vfx=N" 才有意义。
+		//
+		// ⚠️ 命名用 vfx_/sfx_ 前缀 + 语义名，【不要】带卡名。
+		//    "vfx_slash" 会被十几张斩击类卡复用；写成
+		//    "vfx_atk_basic" 会让每张卡都需要一个专属特效，
+		//    美术量凭空翻十倍。
+		//
+		// ⚠️ 这些 id 现在【指向一个还不存在的库】，这是刻意的：
+		//    FHexFxRuntime 对"id 不在库里"会打一条 Warning 并继续，
+		//    所以灰盒期完全可玩，而那条 Warning 恰好是
+		//    给美术的待办清单。
+
 		// ───────────────────────── 三张通用基石卡（§7.2）
 
 		// 《攻击》—— 装备系统（§5）会覆写它的射程/形状，所以即使
@@ -171,6 +235,9 @@ namespace
 				{ FHexEffectStep::MakeDamage(0.0f, CardStatAtk, 1.0f) },
 				{ TEXT("近战") },
 				TEXT("造成 {dmg} 点伤害。"));
+			C.CastAnim = EHexUnitAnim::Attack;
+			C.Effects[0].VfxId = TEXT("vfx_slash");
+			C.Effects[0].SfxId = TEXT("sfx_slash");
 			Out.Add(AsCornerstone(C));
 		}
 
@@ -186,6 +253,12 @@ namespace
 				{ FHexEffectStep::MakeBlock(1.0f, CardStatDef, 0.6f) },
 				{ TEXT("格挡") },
 				TEXT("获得 {block} 点格挡。"));
+			// 守备用 Attack 动作是【已知的临时方案】，不是配错 ——
+			// 模板的 AS_Defend 是"举盾站定"的循环姿态，一次性播完会
+			// 立刻弹回 Idle，看起来像抽搐（见 PlayHeroCardAnim 的注释）。
+			C.CastAnim = EHexUnitAnim::Attack;
+			C.Effects[0].VfxId = TEXT("vfx_guard");
+			C.Effects[0].SfxId = TEXT("sfx_guard");
 			Out.Add(AsCornerstone(C));
 		}
 
@@ -198,6 +271,11 @@ namespace
 				{ FHexEffectStep::MakeMove(2) },
 				{ TEXT("位移") },
 				TEXT("移动最多 {move} 格。"));
+			// 移动【不】声明 CastAnim：行走动画由 HexUnitVisual 按
+			// 位置差分自己驱动（和受击同一套机制），在这里再声明一次
+			// 会让两边抢着播，表现为走一步抽一下。
+			C.Effects[0].VfxId = TEXT("vfx_dash");
+			C.Effects[0].SfxId = TEXT("sfx_step");
 			Out.Add(AsCornerstone(C));
 		}
 
@@ -627,10 +705,48 @@ namespace
 	}
 }
 
+namespace
+{
+	/**
+	 * 可变敌人表 —— 支持表现层的 DataTable 覆写（OverrideEnemy）。
+	 *
+	 * ⚠️ 指针失效风险比卡牌更值得警惕：BeginBattleForRoom 会先
+	 *    GetEncounter 拿到一串 EnemyId，再逐个 FindEnemy + MakeEnemyUnit。
+	 *    若在那期间覆写，前面拿到的 FHexEnemyData* 会指向已释放的内存。
+	 *    所以覆写只在 StartPlay 早期做一次。
+	 */
+	TArray<FHexEnemyData>& MutableEnemies()
+	{
+		static TArray<FHexEnemyData> Enemies = BuildAllEnemies();
+		return Enemies;
+	}
+}
+
 const TArray<FHexEnemyData>& FHexContentLibrary::AllEnemies()
 {
-	static const TArray<FHexEnemyData> Enemies = BuildAllEnemies();
-	return Enemies;
+	return MutableEnemies();
+}
+
+bool FHexContentLibrary::OverrideEnemy(const FHexEnemyData& Enemy)
+{
+	TArray<FHexEnemyData>& Enemies = MutableEnemies();
+
+	for (FHexEnemyData& E : Enemies)
+	{
+		if (E.Id == Enemy.Id)
+		{
+			E = Enemy;
+			return true;
+		}
+	}
+
+	Enemies.Add(Enemy);
+	return false;
+}
+
+void FHexContentLibrary::ResetEnemyOverrides()
+{
+	MutableEnemies() = BuildAllEnemies();
 }
 
 const FHexEnemyData* FHexContentLibrary::FindEnemy(FName Id)
@@ -684,8 +800,84 @@ FHexUnit FHexContentLibrary::MakeEnemyUnit(const FHexEnemyData& Data, int32 Floo
 	U.KnockbackResistOverride = Data.KnockbackResistOverride;
 	U.BossPhase = Data.bIsBoss ? 1 : 0;
 
+	// ── AI 可配置项
+	//
+	// ⚠️ 下限夹取而非信任配表：MoveBudget 填 0 会让敌人永远走不动，
+	//    而它已经在射程外 → 意图恒为 Rotate/Sleep → 战斗永不终止。
+	//    那是"配错一格数字导致整局卡死"，必须在入口挡掉。
+	U.MoveBudget = FMath::Max(1, Data.MoveBudget);
+	U.PreferredDistance = FMath::Max(1, Data.PreferredDistance);
+	// -1 是"用 profile 默认"的哨兵值，所以只夹正数那一侧
+	U.AttackRangeOverride =
+		(Data.AttackRangeOverride < 0) ? -1 : FMath::Max(1, Data.AttackRangeOverride);
+
+	// ── 技能（按优先级排好序后拷 id；冷却从 0 开始，即开局就可用）
+	{
+		TArray<const FHexEnemySkillData*> Skills;
+		GetEnemySkills(Data, Skills);
+
+		U.SkillIds.Reserve(Skills.Num());
+		for (const FHexEnemySkillData* S : Skills)
+		{
+			U.SkillIds.Add(S->Id);
+		}
+		// ⚠️ 必须与 SkillIds 等长。GetSkillCooldown 容忍短数组，
+		//    但在这里就补齐可以让"平行数组不等长"永远不出现在正常路径上。
+		U.SkillCooldowns.SetNumZeroed(U.SkillIds.Num());
+	}
+
 	// Anchor / Facing / Id 由生成器（战场布阵）负责，这里不猜。
 	return U;
+}
+
+// ══════════════════════════════════════════════════════════ 敌人技能
+//
+// 技能表本体在 Content/HexEnemySkillLibrary.cpp 里（与符文表同样的分工），
+// 这里只做转发，避免内容库文件膨胀到无法审阅。
+
+const TArray<FHexEnemySkillData>& FHexContentLibrary::AllEnemySkills()
+{
+	return FHexEnemySkillLibrary::AllSkills();
+}
+
+const FHexEnemySkillData* FHexContentLibrary::FindEnemySkill(FName Id)
+{
+	return FHexEnemySkillLibrary::Find(Id);
+}
+
+void FHexContentLibrary::GetEnemySkills(
+	const FHexEnemyData& Data, TArray<const FHexEnemySkillData*>& Out)
+{
+	Out.Reset();
+
+	for (const FName& Sid : Data.SkillIds)
+	{
+		const FHexEnemySkillData* S = FHexEnemySkillLibrary::Find(Sid);
+		if (!S)
+		{
+			// ⚠️ 引用不到就【跳过这一条】，不是让整只敌人失去行动能力。
+			//    策划在表里写错一个 id 的代价应该是"这个技能不生效"，
+			//    而不是"这只怪整场站着不动" —— 后者会被误判成 AI bug，
+			//    排查方向完全跑偏。引用完整性由 VerifyContent 断言钉住。
+			continue;
+		}
+		Out.Add(S);
+	}
+
+	// ⚠️ 排序【必须在这里做】而不是留给调用方。
+	//    AI 的选技能逻辑"取第一条可用的"直接依赖这个顺序，
+	//    散落到调用方去排会在某个分支里漂移，而结果只是
+	//    "敌人偶尔选了另一个技能"——不报错，且破坏确定性回放。
+	//
+	//    优先级降序；同优先级按 id 字典序（确定性 tiebreak，纪律 5）。
+	Out.Sort([](const FHexEnemySkillData& A, const FHexEnemySkillData& B)
+	{
+		if (A.Priority != B.Priority)
+		{
+			return A.Priority > B.Priority;
+		}
+		return A.Id.LexicalLess(B.Id);
+	});
 }
 
 // ══════════════════════════════════════════════════════════ 怪物组

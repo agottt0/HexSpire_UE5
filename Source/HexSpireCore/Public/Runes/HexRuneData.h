@@ -166,6 +166,17 @@ public:
 	void GetRunesInOrder(TArray<TPair<int32, const FHexRuneData*>>& Out) const;
 
 	/**
+	 * 收集全部已装备符文注入的衍生卡 id（按槽位顺序）。
+	 *
+	 * ⚠️ 这个 API 曾【不存在】：FHexRuneData::InjectedCardIds 字段
+	 *    与引用完整性断言都在，但没有任何消费点 —— 装了注入型符文
+	 *    牌堆里什么都不会出现，且不报错。与 FHexEquipLoadout 的
+	 *    同名函数语义一致：战斗开始建牌堆时两边都要收（衍生卡不占容量，
+	 *    随符文/装备移除自然消失）。
+	 */
+	void GetInjectedCardIds(TArray<FName>& Out) const;
+
+	/**
 	 * 聚合某条规则的最终值。
 	 *
 	 * 聚合规则：

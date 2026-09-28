@@ -80,6 +80,62 @@ int32 FHexCardTableLoader::Apply(const UDataTable* Table)
 		return 0;
 	}
 
+	// ── 检测「表比行结构旧」：整行替换会把缺列的字段冲成默认值
+	//
+	// ⚠️ 这是整行替换语义下最阴的失败，且上面的行结构检查【抓不到】：
+	//    行结构是对的，只是 CSV 里没有这一列 —— 该字段读出类型默认值，
+	//    覆写时把代码内建的值冲掉。
+	//    症状是"内建数据凭空丢失"，查卡牌定义怎么看都是对的。
+	//    CastAnim 就是这么踩的：加了字段、配了内建值、跑起来全是 None。
+	//
+	// ⚠️ 不要试图用 GetColumnTitles() 来判断 ——
+	//    它是【从 RowStruct 推导】的（见引擎 DataTable.cpp:973），
+	//    永远包含全部字段，与表里实际有没有这一列无关。
+	//    UE 在运行时不保留"导入时缺了哪些列"这个信息，
+	//    所以只能用【数据本身】反推。
+	//
+	// 判据：内建有值、表里却是默认值的字段，高度可疑。
+	//   · 全部行都如此 → 几乎肯定是缺列（策划不会把 13 行都改成默认）
+	//   · 只有部分行  → 那是策划的正常编辑，不报
+	{
+		int32 RowsLosingCastAnim = 0;
+		int32 RowsWithBuiltinCastAnim = 0;
+
+		for (const TPair<FName, uint8*>& Pair : Table->GetRowMap())
+		{
+			const FHexCardTableRow* Row =
+				reinterpret_cast<const FHexCardTableRow*>(Pair.Value);
+			if (!Row)
+			{
+				continue;
+			}
+
+			const FHexCardData* Builtin = FHexContentLibrary::FindCard(Pair.Key);
+			if (Builtin && Builtin->CastAnim != EHexUnitAnim::None)
+			{
+				++RowsWithBuiltinCastAnim;
+				if (Row->CastAnim == EHexUnitAnim::None)
+				{
+					++RowsLosingCastAnim;
+				}
+			}
+		}
+
+		if (RowsWithBuiltinCastAnim > 0
+			&& RowsLosingCastAnim == RowsWithBuiltinCastAnim)
+		{
+			// Warning 而非 Error：表旧了仍然可用（其余列照样生效），
+			// 拒绝整张表反而会让策划已配好的数值全部失效，代价更大。
+			UE_LOG(LogHexSpire, Warning,
+				TEXT("卡牌配表疑似缺 CastAnim 列：%d 张卡的内建动作会被覆写成 None"),
+				RowsLosingCastAnim);
+			UE_LOG(LogHexSpire, Warning,
+				TEXT("    症状：角色打出这些卡时不做动作"));
+			UE_LOG(LogHexSpire, Warning,
+				TEXT("    修法：跑 -run=HexExportCards 重新导出 CSV 并重导表"));
+		}
+	}
+
 	GLoadedCardTable.Reset(Table);
 
 	int32 Overridden = 0;

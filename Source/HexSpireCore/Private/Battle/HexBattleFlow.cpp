@@ -1,6 +1,8 @@
 ﻿// Copyright Hex Spire. All Rights Reserved.
 
 #include "Battle/HexBattleFlow.h"
+#include "HexSpireCore.h"
+#include "Battle/HexBattleEventNames.h"
 #include "Battle/HexBattleState.h"
 #include "Battle/HexUnit.h"
 #include "Battle/HexRuleBook.h"
@@ -43,10 +45,15 @@ FHexBattleFlow::FHexBattleFlow(FHexBattleState& InState)
 //     OnKill / OnUnitDeath
 //     OnCardDrawn / OnDeckReshuffled
 //     OnMoveEnemy（推拉造成的位移；卡牌主动推拉已有埋点，见下）
+//   第二批补齐（§6.3 时机表，同样走翻译器）：
+//     OnEnergySpent / OnOverkill / OnRotate / OnStatusTick
+//     OnTerrainChanged / OnEnterHazard
 //
 //   仍由业务代码手写 Emit（保持原状，本次【不动】）：
 //     OnBattleStart / OnRoundStart / OnRoundEnd / OnBattleWin
 //     OnCardPlayed / OnEnergyLeftover     ← 非动作型，没有对应的单一动作
+//     OnStatusExpired                     ← 状态衰减发生在队列外（回合收尾），
+//                                            翻译器看不到，在产生点直接 Emit
 //     OnBlockGained / OnMoveSelf / OnStatusApplied / OnCardDiscarded
 //                                         ← 已有埋点，翻译器【不得】重复处理
 //     OnAttack                            ← ②′ 数值钩子，不走 Emit
@@ -126,7 +133,7 @@ void FHexBattleFlow::DispatchTriggersForAction(
 	for (const FHexBattleEvent& E : NewEvents)
 	{
 		// ── 伤害链
-		if (E.Type == TEXT("damage_dealt"))
+		if (E.Type == HexEv::DamageDealt)
 		{
 			FHexTriggerContext Ctx;
 			Ctx.SourceUnitId = E.SourceUnitId;
@@ -157,7 +164,7 @@ void FHexBattleFlow::DispatchTriggersForAction(
 		}
 
 		// ── 闪避
-		if (E.Type == TEXT("dodged"))
+		if (E.Type == HexEv::Dodged)
 		{
 			if (IsPlayerSide(E.TargetUnitId))
 			{
@@ -170,7 +177,7 @@ void FHexBattleFlow::DispatchTriggersForAction(
 		}
 
 		// ── 格挡被打破
-		if (E.Type == TEXT("block_broken"))
+		if (E.Type == HexEv::BlockBroken)
 		{
 			if (IsPlayerSide(E.TargetUnitId))
 			{
@@ -183,7 +190,7 @@ void FHexBattleFlow::DispatchTriggersForAction(
 		}
 
 		// ── 死亡
-		if (E.Type == TEXT("unit_died"))
+		if (E.Type == HexEv::UnitDied)
 		{
 			FHexTriggerContext Ctx;
 			Ctx.SourceUnitId = E.SourceUnitId;   // 击杀者（环境伤害时为 -1）
@@ -193,6 +200,15 @@ void FHexBattleFlow::DispatchTriggersForAction(
 			if (IsPlayerSide(E.SourceUnitId))
 			{
 				EmitWithBudget(EHexTriggerTiming::OnKill, Ctx, InQueue);
+
+				// OnOverkill：致死一击超出剩余生命的部分（IntA，Resolver 填）。
+				// 只认玩家的超杀 —— 敌人互殴打出的超量与玩家构筑无关。
+				if (E.IntA > 0)
+				{
+					FHexTriggerContext OkCtx = Ctx;
+					OkCtx.IntA = E.IntA;
+					EmitWithBudget(EHexTriggerTiming::OnOverkill, OkCtx, InQueue);
+				}
 			}
 
 			// OnUnitDeath：任何单位死亡，【不过滤】。
@@ -202,8 +218,71 @@ void FHexBattleFlow::DispatchTriggersForAction(
 			continue;
 		}
 
+		// ── 体力消耗（EnergyChanged 的负增量 = 花费）
+		//
+		// ⚠️ 只翻译"支出"。GainEnergy / SetEnergy 也发同一事件，
+		//    把回复也当消耗会让《余烬》类符文在回体力时倒触发。
+		if (E.Type == HexEv::EnergyChanged)
+		{
+			if (E.IntB < 0)
+			{
+				FHexTriggerContext Ctx;
+				Ctx.SourceUnitId = State.HeroUnitId;
+				Ctx.IntA = -E.IntB;   // 消耗量（正数）
+				EmitWithBudget(EHexTriggerTiming::OnEnergySpent, Ctx, InQueue);
+			}
+			continue;
+		}
+
+		// ── 转向（只认玩家 —— 敌人 AI 每回合都在转，翻译它会刷屏触发）
+		if (E.Type == HexEv::UnitRotated)
+		{
+			if (IsPlayerSide(E.TargetUnitId))
+			{
+				FHexTriggerContext Ctx;
+				Ctx.SourceUnitId = E.TargetUnitId;
+				EmitWithBudget(EHexTriggerTiming::OnRotate, Ctx, InQueue);
+			}
+			continue;
+		}
+
+		// ── 状态跳伤（IntA 普通跳伤 / IntB 无视格挡跳伤）
+		//
+		// 不过滤阵营：烧伤流的核心组合是"敌人身上的燃烧跳伤时 X"，
+		// 而承受者永远是敌人。
+		if (E.Type == HexEv::StatusTicked)
+		{
+			FHexTriggerContext Ctx;
+			Ctx.SourceUnitId = State.HeroUnitId;
+			Ctx.TargetUnitId = E.TargetUnitId;
+			Ctx.IntA = E.IntA + E.IntB;
+			EmitWithBudget(EHexTriggerTiming::OnStatusTick, Ctx, InQueue);
+			continue;
+		}
+
+		// ── 地形链
+		if (E.Type == HexEv::TerrainChanged)
+		{
+			FHexTriggerContext Ctx;
+			Ctx.SourceUnitId = State.HeroUnitId;
+			Ctx.IntA = E.IntA;   // 新地形（EHexTerrain）
+			EmitWithBudget(EHexTriggerTiming::OnTerrainChanged, Ctx, InQueue);
+			continue;
+		}
+
+		// 单位踩进危害地形。不过滤阵营 —— "推进尖刺"流要吃敌人踩坑。
+		if (E.Type == HexEv::HazardTriggered)
+		{
+			FHexTriggerContext Ctx;
+			Ctx.SourceUnitId = State.HeroUnitId;
+			Ctx.TargetUnitId = E.TargetUnitId;   // 踩进去的单位
+			Ctx.IntA = E.IntA;                   // 危害伤害量
+			EmitWithBudget(EHexTriggerTiming::OnEnterHazard, Ctx, InQueue);
+			continue;
+		}
+
 		// ── 牌堆链
-		if (E.Type == TEXT("cards_drawn"))
+		if (E.Type == HexEv::CardsDrawn)
 		{
 			FHexTriggerContext Ctx;
 			Ctx.SourceUnitId = State.HeroUnitId;
@@ -212,7 +291,7 @@ void FHexBattleFlow::DispatchTriggersForAction(
 			continue;
 		}
 
-		if (E.Type == TEXT("card_exhausted"))
+		if (E.Type == HexEv::CardExhausted)
 		{
 			FHexTriggerContext Ctx;
 			Ctx.SourceUnitId = State.HeroUnitId;
@@ -221,7 +300,7 @@ void FHexBattleFlow::DispatchTriggersForAction(
 			continue;
 		}
 
-		if (E.Type == TEXT("deck_reshuffled"))
+		if (E.Type == HexEv::DeckReshuffled)
 		{
 			// §6.3 点名这是 D2 带来的好钩子：小卡组会频繁洗回。
 			// 《薄刃契》(容量-3) + 《轮回护符》(洗回得格挡) 的组合
@@ -272,7 +351,7 @@ void FHexBattleFlow::BeginBattle()
 	TriggerBus.ResetBattleCounters();
 	TriggerBus.RebuildListeners(State);
 
-	State.LogEvent(TEXT("battle_start"));
+	State.LogEvent(HexEv::BattleStart);
 
 	// Emit(OnBattleStart)
 	{
@@ -284,7 +363,7 @@ void FHexBattleFlow::BeginBattle()
 
 	// 生成敌方首个意图并显示（§8.4）
 	FHexEnemyAI::DecideAll(State);
-	State.LogEvent(TEXT("intents_updated"));
+	State.LogEvent(HexEv::IntentsUpdated);
 
 	BeginRound();
 }
@@ -333,7 +412,7 @@ void FHexBattleFlow::BeginRound()
 	ResolveQueue();
 
 	State.Phase = EHexBattlePhase::PlayerPhase;
-	State.LogEvent(TEXT("player_phase_begin"));
+	State.LogEvent(HexEv::PlayerPhaseBegin);
 }
 
 // ───────────────────────────────────────────────────────── 出牌
@@ -431,7 +510,7 @@ EHexPlayResult FHexBattleFlow::PlayCard(int32 CardUid, const FIntVector& TargetC
 
 	{
 		FHexBattleEvent E;
-		E.Type = TEXT("card_played");
+		E.Type = HexEv::CardPlayed;
 		E.SourceUnitId = Hero->Id;
 		E.NameA = Card->Id;
 		E.IntA = CardUid;
@@ -471,6 +550,12 @@ void FHexBattleFlow::ExecuteStep(
 	}
 
 	const FString SrcTag = FString::Printf(TEXT("card:%s"), *Card.Id.ToString());
+
+	// 本步骤产出的所有动作自动带上它的表现意图（见 FVisualScope 注释）。
+	// ⚠️ 必须在 switch 【之前】构造：switch 里有 10 个 Push 点，
+	//    逐个手写等于给"新增 op 时忘记抄"留门。
+	const FHexActionQueue::FVisualScope VisualScope(
+		Queue, Step.VfxId, Step.SfxId, Card.CastAnim);
 
 	switch (Step.Op)
 	{
@@ -818,7 +903,7 @@ void FHexBattleFlow::EndPlayerTurn()
 		for (const FHexCardInstance& C : Discarded)
 		{
 			FHexBattleEvent E;
-			E.Type = TEXT("card_discarded");
+			E.Type = HexEv::CardDiscarded;
 			E.IntA = C.Uid;
 			E.NameA = C.CardId;
 			State.LogEvent(E);
@@ -890,7 +975,7 @@ void FHexBattleFlow::TickStatuses(EHexStatusTick Timing)
 void FHexBattleFlow::RunEnemyPhase()
 {
 	State.Phase = EHexBattlePhase::EnemyPhase;
-	State.LogEvent(TEXT("enemy_phase_begin"));
+	State.LogEvent(HexEv::EnemyPhaseBegin);
 
 	// 按 AGI 降序依次行动（同值按 id 升序 —— 确定性 tiebreak）
 	TArray<int32> Order;
@@ -916,7 +1001,7 @@ void FHexBattleFlow::RunEnemyPhase()
 
 	// 生成下回合意图并立即显示（§8.4：预警是可读性的生命线）
 	FHexEnemyAI::DecideAll(State);
-	State.LogEvent(TEXT("intents_updated"));
+	State.LogEvent(HexEv::IntentsUpdated);
 }
 
 // ───────────────────────────────────────────────────────── 回合总结束
@@ -932,14 +1017,28 @@ void FHexBattleFlow::RunRoundEndAll()
 		for (const FIntVector& C : Expired)
 		{
 			FHexBattleEvent E;
-			E.Type = TEXT("hazard_expired");
+			E.Type = HexEv::HazardExpired;
 			E.CoordA = C;
 			State.LogEvent(E);
 		}
 	}
 
+	// 敌人技能冷却 -1
+	//
+	// ⚠️ 放在 RoundEndAll 而不是敌方阶段结束后，是为了让"冷却 1 回合"
+	//    的语义是「隔一个完整回合」。放在敌方阶段里 tick 的话，
+	//    敌人施放后立刻减 1，下回合就又能放 —— CooldownRounds=1 等于没有冷却。
+	for (FHexUnit& U : State.GetUnitsMutable())
+	{
+		if (U.bIsAlive)
+		{
+			U.TickSkillCooldowns();
+		}
+	}
+
 	// 状态持续时间 -1 / 过期移除
 	{
+		bool bAnyExpired = false;
 		for (FHexUnit& U : State.GetUnitsMutable())
 		{
 			if (!U.bIsAlive)
@@ -951,11 +1050,28 @@ void FHexBattleFlow::RunRoundEndAll()
 			for (const FName& S : ExpiredStatuses)
 			{
 				FHexBattleEvent E;
-				E.Type = TEXT("status_expired");
+				E.Type = HexEv::StatusExpired;
 				E.TargetUnitId = U.Id;
 				E.NameA = S;
 				State.LogEvent(E);
+
+				// Emit(OnStatusExpired)
+				//
+				// ⚠️ 必须在这里手写：状态衰减发生在队列外（回合收尾），
+				//    事件不经过 DispatchTriggersForAction。
+				//    NameA 放进 CardTags，让符文能用 FilterTag 只认
+				//    特定状态（"燃烧到期时…"）。
+				FHexTriggerContext Ctx;
+				Ctx.SourceUnitId = State.HeroUnitId;
+				Ctx.TargetUnitId = U.Id;
+				Ctx.CardTags = { S };
+				TriggerBus.Emit(EHexTriggerTiming::OnStatusExpired, Ctx, State, Queue);
+				bAnyExpired = true;
 			}
+		}
+		if (bAnyExpired)
+		{
+			ResolveQueue();
 		}
 	}
 }
@@ -974,7 +1090,7 @@ bool FHexBattleFlow::CheckBattleEnd()
 	if (State.IsPlayerDefeated())
 	{
 		State.Phase = EHexBattlePhase::BattleLose;
-		State.LogEvent(TEXT("battle_lose"));
+		State.LogEvent(HexEv::BattleLose);
 		return true;
 	}
 
@@ -986,7 +1102,7 @@ bool FHexBattleFlow::CheckBattleEnd()
 		TriggerBus.Emit(EHexTriggerTiming::OnBattleWin, Ctx, State, Queue);
 		ResolveQueue();
 
-		State.LogEvent(TEXT("battle_win"));
+		State.LogEvent(HexEv::BattleWin);
 		EnterExplorePhase();
 		return true;
 	}
@@ -1008,7 +1124,7 @@ void FHexBattleFlow::EnterExplorePhase()
 	Queue.PushBack(FHexActions::DrawCards(FHexRuleBook::HandLimit(State)));
 	ResolveQueue();
 
-	State.LogEvent(TEXT("explore_phase_begin"));
+	State.LogEvent(HexEv::ExplorePhaseBegin);
 }
 
 bool FHexBattleFlow::IsBattleOver() const

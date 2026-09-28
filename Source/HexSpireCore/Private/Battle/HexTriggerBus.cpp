@@ -2,6 +2,7 @@
 
 #include "Battle/HexTriggerBus.h"
 #include "Battle/HexBattleState.h"
+#include "Battle/HexBattleEventNames.h"
 #include "Battle/HexGameAction.h"
 #include "Battle/HexUnit.h"
 #include "Runes/HexRuneData.h"
@@ -338,7 +339,7 @@ void FHexTriggerBus::Emit(
 		++Fired;
 
 		FHexBattleEvent E;
-		E.Type = TEXT("rune_triggered");
+		E.Type = HexEv::RuneTriggered;
 		E.TextA = L.SourceTag;
 		E.IntA = static_cast<int32>(Timing);
 		E.IntB = L.SlotOrder;

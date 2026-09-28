@@ -49,6 +49,7 @@
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
 #include "UI/HexCardWidget.h"
+#include "UI/HexRuneSlotWidget.h"
 // ⚠️ 必须是完整包含而非前置声明：下面 ResolveHeroArt() 返回
 //    HexTopBarLayout::FHeroUIArt 的引用，而命名空间里的嵌套结构
 //    没法用 `struct X::Y;` 这种形式前置声明（C++ 不允许限定名前置声明）。
@@ -121,6 +122,16 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "卡牌")
 	TSubclassOf<UHexCardWidget> FixedCardWidgetClass;
+
+	/**
+	 * 符文槽用的控件类。
+	 *
+	 * 留空时自动找 /Game/HexSpire/UI/WB_RuneSlot（或 WBP_ 前缀），
+	 * 找不到才回退到 C++ 版 UHexRuneSlotWidget。
+	 * 与卡牌分开类是刻意的（结构不同，见 HexRuneSlotWidget.h 顶部）。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "符文")
+	TSubclassOf<UHexRuneSlotWidget> RuneSlotWidgetClass;
 
 	/**
 	 * 设计器里预览几张假卡。
@@ -438,6 +449,24 @@ protected:
 	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
 	UTextBlock* EnergyCount = nullptr;
 
+	// ── 符文面板（§6.5）
+	//
+	// ⚠️ 与顶栏一样【不随战斗折叠】：重排恰恰只能在战斗外做，
+	//    地图界面正是玩家调顺序的地方。
+
+	/** 6 个符文槽的横排容器 */
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UHorizontalBox* RuneBox = nullptr;
+
+	/**
+	 * 顺序指示标签（"符文 · 结算顺序 →"）。
+	 *
+	 * ⚠️ §6.5 硬性 UI 要求：不明示方向，玩家不会意识到顺序有意义，
+	 *    [锐化,倍化]≠[倍化,锐化] 这层免费深度就直接丢了。
+	 */
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional), Transient)
+	UTextBlock* RuneOrderLabel = nullptr;
+
 
 private:
 	/**
@@ -508,6 +537,29 @@ private:
 	/** C++ 默认树里搭顶栏（没建蓝图时才走） */
 	void BuildTopBarDefaultTree(UCanvasPanel* Canvas);
 
+	/**
+	 * 按当前状态刷新符文面板。
+	 *
+	 * ⚠️ 与顶栏同一条规则：必须在"非战斗折叠卡牌"之前调用且无条件刷 ——
+	 *    战斗外才能重排，折叠掉它等于把重排功能整个藏起来。
+	 */
+	void RefreshRunePanel(AHexDemoGameMode* Mode);
+
+	/**
+	 * 槽位点击：第一次选中（高亮），第二次与之交换。
+	 *
+	 * ⚠️ 锁定判定不在这里做 —— RunState::ReorderRune 是唯一权威，
+	 *    这里只读 bRuneLayoutLocked 决定"要不要进入选中态"
+	 *    （锁定时直接把请求发过去换一条状态提示回来）。
+	 */
+	void OnRuneSlotClicked(int32 SlotIndex);
+
+	/** 定符文槽控件类：显式指定 → 约定路径 WBP → C++ 版 */
+	UClass* ResolveRuneSlotClass();
+
+	/** C++ 默认树里搭符文面板（没建蓝图时才走） */
+	void BuildRunePanelDefaultTree(UCanvasPanel* Canvas);
+
 	/** 取当前该显示哪个角色的 UI 资产 */
 	const HexTopBarLayout::FHeroUIArt& ResolveHeroArt() const;
 
@@ -555,6 +607,18 @@ private:
 
 	/** 体力火苗控件池（同卡牌：折叠复用而不是销毁重建） */
 	UPROPERTY(Transient) TArray<UImage*> EnergyPips;
+
+	/** 符文槽控件池（固定 6 个，建一次不增删） */
+	UPROPERTY(Transient) TArray<UHexRuneSlotWidget*> RuneSlots;
+
+	/** ResolveRuneSlotClass 的缓存结果 */
+	UPROPERTY(Transient) UClass* ResolvedRuneSlotClass = nullptr;
+
+	/**
+	 * 重排：已选中待交换的槽位，INDEX_NONE = 未选。
+	 * ⚠️ 只是 UI 态，不进 RunState —— 交换本身才是逻辑操作。
+	 */
+	int32 PendingSwapSlot = INDEX_NONE;
 
 	/** ResolveCardClass 的缓存结果 */
 	UPROPERTY(Transient) UClass* ResolvedCardClass = nullptr;

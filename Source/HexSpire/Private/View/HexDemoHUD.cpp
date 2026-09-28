@@ -165,6 +165,9 @@ void AHexDemoHUD::DrawHUD()
 		{
 			DrawPileBrowser(Mode);
 		}
+
+		// 胜负横幅必须画在战斗浮层最后（盖过意图线与血条）
+		DrawBattleOutcomeBanner(Mode);
 	}
 	else
 	{
@@ -812,6 +815,61 @@ void AHexDemoHUD::DrawRewardPanel(AHexDemoGameMode* Mode)
 				Run->RuneInventory.Num()),
 			X + 30.0f, RowY, ColWarn, 0.88f);
 	}
+}
+
+// ══════════════════════════════════════════════════════════ 胜负横幅
+
+void AHexDemoHUD::DrawBattleOutcomeBanner(AHexDemoGameMode* Mode)
+{
+	if (!Mode->IsBattleOver())
+	{
+		return;
+	}
+
+	const bool bLose = Mode->IsPlayerDefeated();
+	const bool bBoss = (Mode->GetCurrentRoomType() == EHexRoomType::Boss);
+
+	FString Title;
+	FString Sub;
+	FLinearColor Accent;
+	if (bLose)
+	{
+		Title = TEXT("败  北");
+		Sub = TEXT("按 R 重开一局");
+		Accent = FLinearColor(0.85f, 0.20f, 0.22f);
+	}
+	else if (bBoss)
+	{
+		Title = TEXT("★ BOSS 击破 ★");
+		Sub = TEXT("按 Enter 进入层结算（三选一奖励）");
+		Accent = FLinearColor(0.95f, 0.78f, 0.22f);
+	}
+	else
+	{
+		Title = TEXT("战 斗 胜 利");
+		Sub = TEXT("按 Enter 结算并回到地图");
+		Accent = FLinearColor(0.55f, 0.85f, 0.40f);
+	}
+
+	// 放在屏幕上三分之一处 —— 正中会压住战场焦点，底部有手牌
+	const float CX = Canvas->SizeX * 0.5f;
+	const float CY = Canvas->SizeY * 0.32f;
+	const float W = 560.0f;
+	const float H = 104.0f;
+
+	DrawPanel(CX - W * 0.5f, CY - H * 0.5f,
+		W, H, FLinearColor(0.05f, 0.05f, 0.07f), 0.88f);
+	DrawSolidBox(CX - W * 0.5f, CY - H * 0.5f, W, H, Accent, 2.0f);
+
+	// 标题居中（GetTextSize 量宽度，不能按字数估 —— 中英混排宽度不齐）
+	float TW = 0.0f;
+	float TH = 0.0f;
+	GetTextSize(Title, TW, TH, HudFont, 2.2f);
+	DrawTextShadowed(Title, CX - TW * 0.5f, CY - H * 0.5f + 16.0f, Accent, 2.2f);
+
+	GetTextSize(Sub, TW, TH, HudFont, 1.2f);
+	DrawTextShadowed(Sub, CX - TW * 0.5f, CY + H * 0.5f - TH - 14.0f,
+		FLinearColor(0.9f, 0.9f, 0.88f), 1.2f);
 }
 
 // ══════════════════════════════════════════════════════════ 图例与帮助

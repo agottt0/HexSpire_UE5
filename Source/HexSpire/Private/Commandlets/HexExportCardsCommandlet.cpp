@@ -48,7 +48,6 @@ namespace
 		return FString::Printf(TEXT("\"%s\""), *Out);
 	}
 
-	/** FName 数组 → "a|b|c"（CSV 里不能用逗号分隔子项） */
 	/**
 	 * 空 FName 导出成空串而不是 "None"。
 	 *
@@ -62,15 +61,28 @@ namespace
 		return N.IsNone() ? FString() : N.ToString();
 	}
 
-	FString JoinNames(const TArray<FName>& In)
+	/**
+	 * FName 数组 → UE 数组字面量：("a","b","c")，空数组 → 空串。
+	 *
+	 * ⚠️ 不能用 "a|b|c" 这类自造分隔符。FArrayProperty::ImportText
+	 *    要求单元格以 '(' 开头（空串除外，空串视为空数组），否则整格
+	 *    解析失败 —— 该列静默变成空数组，只在导入日志里留一条含糊的
+	 *    Problem 警告。DT_Cards 首次建表时 Tags 就是这么全丢的。
+	 *    含逗号，所以整格必须再过一遍 Csv()。
+	 */
+	FString NamesLiteral(const TArray<FName>& In)
 	{
+		if (In.Num() == 0)
+		{
+			return FString();
+		}
 		TArray<FString> Parts;
 		Parts.Reserve(In.Num());
 		for (const FName& N : In)
 		{
-			Parts.Add(N.ToString());
+			Parts.Add(FString::Printf(TEXT("\"%s\""), *N.ToString()));
 		}
-		return FString::Join(Parts, TEXT("|"));
+		return FString::Printf(TEXT("(%s)"), *FString::Join(Parts, TEXT(",")));
 	}
 
 	/**
@@ -152,7 +164,13 @@ int32 UHexExportCardsCommandlet::Main(const FString& Params)
 	// ⚠️ 第一列必须叫 Name —— DataTable 导入时用它做 RowName。
 	//    列名其余部分必须与 FHexCardTableRow 的 UPROPERTY 同名。
 	TArray<FString> Lines;
-	Lines.Add(TEXT("Name,DisplayName,CardType,Rarity,EnergyCost,Tags,")
+	// ⚠️ 列名必须与 FHexCardTableRow 的 UPROPERTY 逐字同名，
+	//    且【新增字段必须同时加到这里】。漏加的后果是：
+	//    导出的 CSV 缺这一列 → 导回来时该列取类型默认值 →
+	//    覆写（整行替换）把代码内建的值冲掉。
+	//    也就是说"漏改导出器"会表现为"内建数据凭空丢失"，
+	//    而查卡牌定义时怎么看都是对的。CastAnim 就是这么踩的。
+	Lines.Add(TEXT("Name,DisplayName,CardType,Rarity,EnergyCost,Tags,CastAnim,")
 		TEXT("TargetSpec,Effects,")
 		TEXT("bIsCornerstone,bIsExhaust,bCountsTowardCapacity,MaxCopiesInDeck,")
 		TEXT("DescriptionTemplate"));
@@ -165,7 +183,8 @@ int32 UHexExportCardsCommandlet::Main(const FString& Params)
 		Cols.Add(EnumName(C.CardType));
 		Cols.Add(EnumName(C.Rarity));
 		Cols.Add(FString::FromInt(C.EnergyCost));
-		Cols.Add(Csv(JoinNames(C.Tags)));
+		Cols.Add(Csv(NamesLiteral(C.Tags)));
+		Cols.Add(EnumName(C.CastAnim));
 		Cols.Add(Csv(TargetSpecLiteral(C.TargetSpec)));
 		Cols.Add(Csv(EffectsLiteral(C.Effects)));
 		Cols.Add(C.bIsCornerstone ? TEXT("True") : TEXT("False"));
