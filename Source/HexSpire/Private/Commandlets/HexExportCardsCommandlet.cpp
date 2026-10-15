@@ -10,44 +10,16 @@
 #include "Misc/Paths.h"
 #include "UObject/EnumProperty.h"
 
+#include "Commandlets/HexCsvExport.h"
+
+// 与 HexExportUnitsCommandlet 共用的三个助手。见 HexCsvExport.h 里关于
+// unity build 下匿名命名空间重名的说明。
+using HexCsvExport::EnumName;
+using HexCsvExport::Csv;
+using HexCsvExport::NamesLiteral;
+
 namespace
 {
-	/**
-	 * 取枚举值的【标识名】（如 "Attack"），而不是 DisplayName（"攻击"）。
-	 *
-	 * ⚠️ 必须用标识名。DataTable 导入 CSV 时按枚举的标识名匹配，
-	 *    写中文 DisplayName 会导入失败并静默填成枚举的第 0 项 ——
-	 *    于是所有卡都变成"攻击"类型，而且不报错。
-	 */
-	template <typename TEnum>
-	FString EnumName(TEnum Value)
-	{
-		const UEnum* E = StaticEnum<TEnum>();
-		if (!E)
-		{
-			return FString::FromInt(static_cast<int32>(Value));
-		}
-		// GetNameStringByValue 返回不带作用域前缀的短名
-		return E->GetNameStringByValue(static_cast<int64>(Value));
-	}
-
-	/**
-	 * CSV 字段转义。
-	 *
-	 * ⚠️ 描述模板里有中文逗号也有半角逗号（"造成 {dmg} 点伤害，并击退 {kb} 格"），
-	 *    不转义会让那一行的列数错位 —— 后面所有字段整体左移，
-	 *    而 DataTable 导入时只会报一条模糊的行解析警告。
-	 */
-	FString Csv(const FString& In)
-	{
-		if (!In.Contains(TEXT(",")) && !In.Contains(TEXT("\"")) && !In.Contains(TEXT("\n")))
-		{
-			return In;
-		}
-		FString Out = In.Replace(TEXT("\""), TEXT("\"\""));
-		return FString::Printf(TEXT("\"%s\""), *Out);
-	}
-
 	/**
 	 * 空 FName 导出成空串而不是 "None"。
 	 *
@@ -59,30 +31,6 @@ namespace
 	FString NameCell(const FName& N)
 	{
 		return N.IsNone() ? FString() : N.ToString();
-	}
-
-	/**
-	 * FName 数组 → UE 数组字面量：("a","b","c")，空数组 → 空串。
-	 *
-	 * ⚠️ 不能用 "a|b|c" 这类自造分隔符。FArrayProperty::ImportText
-	 *    要求单元格以 '(' 开头（空串除外，空串视为空数组），否则整格
-	 *    解析失败 —— 该列静默变成空数组，只在导入日志里留一条含糊的
-	 *    Problem 警告。DT_Cards 首次建表时 Tags 就是这么全丢的。
-	 *    含逗号，所以整格必须再过一遍 Csv()。
-	 */
-	FString NamesLiteral(const TArray<FName>& In)
-	{
-		if (In.Num() == 0)
-		{
-			return FString();
-		}
-		TArray<FString> Parts;
-		Parts.Reserve(In.Num());
-		for (const FName& N : In)
-		{
-			Parts.Add(FString::Printf(TEXT("\"%s\""), *N.ToString()));
-		}
-		return FString::Printf(TEXT("(%s)"), *FString::Join(Parts, TEXT(",")));
 	}
 
 	/**
